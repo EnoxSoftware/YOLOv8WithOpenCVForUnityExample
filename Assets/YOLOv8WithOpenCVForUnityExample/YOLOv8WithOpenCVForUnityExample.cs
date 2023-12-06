@@ -75,7 +75,6 @@ namespace YOLOv8WithOpenCVForUnityExample
             SceneManager.LoadScene("YOLOv8ObjectDetectionExample");
         }
 
-        /*
         public void OnYOLOv8SegmentationExampleButtonClick()
         {
             SceneManager.LoadScene("YOLOv8SegmentationExample");
@@ -85,6 +84,6 @@ namespace YOLOv8WithOpenCVForUnityExample
         {
             SceneManager.LoadScene("YOLOv8ClassificationExample");
         }
-        */
+        
     }
 }
