@@ -123,7 +123,7 @@ namespace YOLOv8WithOpenCVForUnity
                 output_blob[i].Dispose();
             }
 
-            return results;
+            return results;// [1, num_classes]
         }
 
         protected virtual Mat postprocess(List<Mat> output_blob, Size original_shape)

@@ -84,6 +84,10 @@ namespace YOLOv8WithOpenCVForUnityExample
         {
             SceneManager.LoadScene("YOLOv8ClassificationExample");
         }
-        
+        public void OnYOLOv8PoseEstimationExampleButtonClick()
+        {
+            SceneManager.LoadScene("YOLOv8PoseEstimationExample");
+        }
+
     }
 }

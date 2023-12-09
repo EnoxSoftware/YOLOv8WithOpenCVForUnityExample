@@ -13,28 +13,31 @@ using OpenCVRect = OpenCVForUnity.CoreModule.Rect;
 namespace YOLOv8WithOpenCVForUnity
 {
 
-    public class YOLOv8SegmentPredictor
+    public class YOLOv8PoseEstimater
     {
         Size input_size;
         float conf_threshold;
         float nms_threshold;
         int topK;
-        bool upsample;
         int backend;
         int target;
 
-        int num_classes = 80;
-        int num_masks = 32;
+        int num_classes = 1;
+        int num_kpts = 51;// 17*3
         bool class_agnostic = false;// Non-use of multi-class NMS
 
-        Net segmentation_net;
+        Net object_detection_net;
         List<string> classNames;
 
         List<Scalar> palette;
+        List<Scalar> pose_palette;
+        int[,] skeleton;
+        int[] limb_color_ind;
+        int[] kpt_color_ind;
 
         Mat maxSizeImg;
 
-        Mat pickup_blob_numx6mask;
+        Mat pickup_blob_numx6kpts;
         Mat boxesMat;
 
         Mat boxes_m_c4;
@@ -44,18 +47,12 @@ namespace YOLOv8WithOpenCVForUnity
         MatOfFloat confidences;
         MatOfInt class_ids;
 
-        Mat all_0;
-        Mat c_mask;
-        Mat upsample_masks_1xihiw_32FC1;
-        Mat maskMat;
-        Mat colorMat;
-
-        public YOLOv8SegmentPredictor(string modelFilepath, string classesFilepath, Size inputSize, float confThreshold = 0.25f, float nmsThreshold = 0.45f, int topK = 300, bool upsample = true, int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
+        public YOLOv8PoseEstimater(string modelFilepath, string classesFilepath, Size inputSize, float confThreshold = 0.25f, float nmsThreshold = 0.45f, int topK = 300, int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
         {
             // initialize
             if (!string.IsNullOrEmpty(modelFilepath))
             {
-                segmentation_net = Dnn.readNet(modelFilepath);
+                object_detection_net = Dnn.readNet(modelFilepath);
             }
 
             if (!string.IsNullOrEmpty(classesFilepath))
@@ -68,12 +65,11 @@ namespace YOLOv8WithOpenCVForUnity
             conf_threshold = Mathf.Clamp01(confThreshold);
             nms_threshold = Mathf.Clamp01(nmsThreshold);
             this.topK = topK;
-            this.upsample = upsample;
             this.backend = backend;
             this.target = target;
 
-            segmentation_net.setPreferableBackend(this.backend);
-            segmentation_net.setPreferableTarget(this.target);
+            object_detection_net.setPreferableBackend(this.backend);
+            object_detection_net.setPreferableTarget(this.target);
 
             palette = new List<Scalar>();
             palette.Add(new Scalar(255, 56, 56, 255));
@@ -96,6 +92,33 @@ namespace YOLOv8WithOpenCVForUnity
             palette.Add(new Scalar(203, 56, 255, 255));
             palette.Add(new Scalar(255, 149, 200, 255));
             palette.Add(new Scalar(255, 55, 199, 255));
+
+            pose_palette = new List<Scalar>();
+            pose_palette.Add(new Scalar(0, 128, 255, 255));
+            pose_palette.Add(new Scalar(51, 153, 255, 255));
+            pose_palette.Add(new Scalar(102, 178, 255, 255));
+            pose_palette.Add(new Scalar(0, 230, 230, 255));
+            pose_palette.Add(new Scalar(255, 153, 255, 255));
+            pose_palette.Add(new Scalar(255, 204, 153, 255));
+            pose_palette.Add(new Scalar(255, 102, 255, 255));
+            pose_palette.Add(new Scalar(255, 51, 255, 255));
+            pose_palette.Add(new Scalar(255, 178, 102, 255));
+            pose_palette.Add(new Scalar(255, 153, 51, 255));
+            pose_palette.Add(new Scalar(153, 153, 255, 255));
+            pose_palette.Add(new Scalar(102, 102, 255, 255));
+            pose_palette.Add(new Scalar(51, 51, 255, 255));
+            pose_palette.Add(new Scalar(153, 255, 153, 255));
+            pose_palette.Add(new Scalar(102, 255, 102, 255));
+            pose_palette.Add(new Scalar(51, 255, 51, 255));
+            pose_palette.Add(new Scalar(0, 255, 0, 255));
+            pose_palette.Add(new Scalar(255, 0, 0, 255));
+            pose_palette.Add(new Scalar(0, 0, 255, 255));
+            pose_palette.Add(new Scalar(255, 255, 255, 255));
+
+            skeleton = new int[,] { { 16, 14 }, { 14, 12 }, { 17, 15 }, { 15, 13 }, { 12, 13 }, { 6, 12 }, { 7, 13 }, { 6, 7 }, { 6, 8 }, {7, 9 },
+                                    { 8, 10 }, {9, 11 }, {2, 3 }, {1, 2 }, {1, 3 }, {2, 4 }, {3, 5 }, {4, 6 }, {5, 7 } };
+            limb_color_ind = new int[] { 9, 9, 9, 9, 7, 7, 7, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16 };
+            kpt_color_ind = new int[] { 16, 16, 16, 16, 16, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9 };
         }
 
         protected virtual Mat preprocess(Mat image)
@@ -104,13 +127,11 @@ namespace YOLOv8WithOpenCVForUnity
             int max = Mathf.Max(image.cols(), image.rows());
 
             if (maxSizeImg == null)
-                maxSizeImg = new Mat(max, max, image.type(), Scalar.all(114));
+                maxSizeImg = new Mat(max, max, image.type());
             if (maxSizeImg.width() != max || maxSizeImg.height() != max)
-            {
                 maxSizeImg.create(max, max, image.type());
-                Imgproc.rectangle(maxSizeImg, new OpenCVRect(0, 0, maxSizeImg.width(), maxSizeImg.height()), Scalar.all(114), -1);
-            }
 
+            Imgproc.rectangle(maxSizeImg, new OpenCVRect(0, 0, maxSizeImg.width(), maxSizeImg.height()), Scalar.all(114), -1);
             Mat _maxSizeImg_roi = new Mat(maxSizeImg, new OpenCVRect((max - image.cols()) / 2, (max - image.rows()) / 2, image.cols(), image.rows()));
             image.copyTo(_maxSizeImg_roi);
 
@@ -133,23 +154,17 @@ namespace YOLOv8WithOpenCVForUnity
             Mat input_blob = preprocess(image);
 
             // Forward
-            segmentation_net.setInput(input_blob);
+            object_detection_net.setInput(input_blob);
 
             List<Mat> output_blob = new List<Mat>();
-            segmentation_net.forward(output_blob, segmentation_net.getUnconnectedOutLayersNames());
+            object_detection_net.forward(output_blob, object_detection_net.getUnconnectedOutLayersNames());
 
             // Postprocess
             Mat det = postprocess(output_blob[0], image.size());
 
-            // process_mask
-            Mat proto = output_blob[1];
-            Mat proto_s1xs2xs3 = proto.reshape(1, new int[] { proto.size(1), proto.size(2), proto.size(3) });// [1, 32, 160, 160] => [32, 160, 160]
-            Mat masks_in = det.colRange(new OpenCVRange(6, 38));
-            Mat bboxes = det.colRange(new OpenCVRange(0, 4));
-            Mat masks = process_mask(proto_s1xs2xs3, masks_in, bboxes, input_size, upsample);
-
-            // scale_boxes
+            // scale_boxes and scale_landmarks
             Mat det_c0_c6 = det.colRange(0, 6).clone();
+            Mat kpts = det.colRange(6, 6 + num_kpts).clone();
             float maxSize = Mathf.Max((float)image.size().width, (float)image.size().height);
             float x_factor = maxSize / (float)input_size.width;
             float y_factor = maxSize / (float)input_size.height;
@@ -166,6 +181,17 @@ namespace YOLOv8WithOpenCVForUnity
                 float y2 = Mathf.Round(det_arr[3] * y_factor - y_shift);
 
                 det_c0_c6.put(i, 0, new float[] { x1, y1, x2, y2 });
+
+
+                float[] landmarks_arr = new float[num_kpts];
+                kpts.get(i, 0, landmarks_arr);
+                for (int j = 0; j < landmarks_arr.Length; j += 3)
+                {
+                    landmarks_arr[j] = Mathf.Floor(landmarks_arr[j] * x_factor - x_shift);
+                    landmarks_arr[j + 1] = Mathf.Floor(landmarks_arr[j + 1] * y_factor - y_shift);
+                }
+
+                kpts.put(i, 0, landmarks_arr);
             }
 
 
@@ -180,11 +206,11 @@ namespace YOLOv8WithOpenCVForUnity
 
             List<Mat> results = new List<Mat>();
             results.Add(det_c0_c6);
-            results.Add(masks);
+            results.Add(kpts);
 
 
             // results[0] = [n, 6] (xyxy, conf, cls)
-            // results[1] = [n, 160, 160] or [n, 640, 640] (masks) 
+            // results[1] = [n, 51] (kpts)
             return results;
         }
 
@@ -192,25 +218,25 @@ namespace YOLOv8WithOpenCVForUnity
         {
             Mat output_blob_0 = output_blob;
 
-            // 1*116*8400 -> 1*8400*116
+            // 1*56*8400 -> 1*8400*56
             MatOfInt order = new MatOfInt(0, 2, 1);
             Core.transposeND(output_blob_0, order, output_blob_0);
 
-            if (output_blob_0.size(2) < 4 + num_classes + num_masks)
+            if (output_blob_0.size(2) < 4 + num_classes + num_kpts)
                 return new Mat();
 
             int num = output_blob_0.size(1);
-            Mat output_blob_numx116 = output_blob_0.reshape(1, num);
-            Mat box_delta = output_blob_numx116.colRange(new OpenCVRange(0, 4));
-            Mat classes_scores_delta = output_blob_numx116.colRange(new OpenCVRange(4, 4 + num_classes));
-            Mat mask_delta = output_blob_numx116.colRange(new OpenCVRange(4 + num_classes, 4 + num_classes + num_masks));
+            Mat output_blob_numx56 = output_blob_0.reshape(1, num);
+            Mat box_delta = output_blob_numx56.colRange(new OpenCVRange(0, 4));
+            Mat classes_scores_delta = output_blob_numx56.colRange(new OpenCVRange(4, 4 + num_classes));
+            Mat kpts_delta = output_blob_numx56.colRange(new OpenCVRange(4 + num_classes, 4 + num_classes + num_kpts));
 
             // pre-NMS
             // Pick up rows to process by conf_threshold value and calculate scores and class_ids.
-            if (pickup_blob_numx6mask == null)
-                pickup_blob_numx6mask = new Mat(300, 6 + num_masks, CvType.CV_32FC1, new Scalar(0));
+            if (pickup_blob_numx6kpts == null)
+                pickup_blob_numx6kpts = new Mat(300, 6 + num_kpts, CvType.CV_32FC1, new Scalar(0));
 
-            Imgproc.rectangle(pickup_blob_numx6mask, new OpenCVRect(4, 0, 1, pickup_blob_numx6mask.rows()), Scalar.all(0), -1);
+            Imgproc.rectangle(pickup_blob_numx6kpts, new OpenCVRect(4, 0, 1, pickup_blob_numx6kpts.rows()), Scalar.all(0), -1);
 
             int ind = 0;
             for (int i = 0; i < num; ++i)
@@ -221,29 +247,29 @@ namespace YOLOv8WithOpenCVForUnity
 
                 if (conf > conf_threshold)
                 {
-                    if (ind > pickup_blob_numx6mask.rows())
+                    if (ind > pickup_blob_numx6kpts.rows())
                     {
-                        Mat _conf_blob_numx6 = new Mat(pickup_blob_numx6mask.rows() * 2, pickup_blob_numx6mask.cols(), pickup_blob_numx6mask.type(), new Scalar(0));
-                        pickup_blob_numx6mask.copyTo(_conf_blob_numx6.rowRange(0, pickup_blob_numx6mask.rows()));
-                        pickup_blob_numx6mask = _conf_blob_numx6;
+                        Mat _conf_blob_numx6 = new Mat(pickup_blob_numx6kpts.rows() * 2, pickup_blob_numx6kpts.cols(), pickup_blob_numx6kpts.type(), new Scalar(0));
+                        pickup_blob_numx6kpts.copyTo(_conf_blob_numx6.rowRange(0, pickup_blob_numx6kpts.rows()));
+                        pickup_blob_numx6kpts = _conf_blob_numx6;
                     }
 
                     float[] box_arr = new float[4];
                     box_delta.get(i, 0, box_arr);
 
-                    pickup_blob_numx6mask.put(ind, 0, new float[] { box_arr[0], box_arr[1], box_arr[2], box_arr[3], conf, (float)minmax.maxLoc.x });
+                    pickup_blob_numx6kpts.put(ind, 0, new float[] { box_arr[0], box_arr[1], box_arr[2], box_arr[3], conf, (float)minmax.maxLoc.x });
 
-                    float[] mask_arr = new float[num_masks];
-                    mask_delta.get(i, 0, mask_arr);
-                    pickup_blob_numx6mask.put(ind, 6, mask_arr);
+                    float[] kpts_arr = new float[num_kpts];
+                    kpts_delta.get(i, 0, kpts_arr);
+                    pickup_blob_numx6kpts.put(ind, 6, kpts_arr);
 
                     ind++;
                 }
             }
 
-            int num_pickup = pickup_blob_numx6mask.rows();
-            Mat pickup_box_delta = pickup_blob_numx6mask.colRange(new OpenCVRange(0, 4));
-            Mat pickup_confidence = pickup_blob_numx6mask.colRange(new OpenCVRange(4, 5));
+            int num_pickup = pickup_blob_numx6kpts.rows();
+            Mat pickup_box_delta = pickup_blob_numx6kpts.colRange(new OpenCVRange(0, 4));
+            Mat pickup_confidence = pickup_blob_numx6kpts.colRange(new OpenCVRange(4, 5));
 
             // Convert boxes from [cx, cy, w, h] to [x, y, w, h] where Rect2d data style.
             if (boxesMat == null || boxesMat.rows() != num_pickup)
@@ -282,7 +308,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
             else
             {
-                Mat pickup_class_ids = pickup_blob_numx6mask.colRange(new OpenCVRange(5, 6));
+                Mat pickup_class_ids = pickup_blob_numx6kpts.colRange(new OpenCVRange(5, 6));
 
                 if (class_ids_m == null || class_ids_m.rows() != num_pickup)
                     class_ids_m = new Mat(num_pickup, 1, CvType.CV_32SC1);
@@ -295,13 +321,13 @@ namespace YOLOv8WithOpenCVForUnity
                 Dnn.NMSBoxesBatched(boxes, confidences, class_ids, conf_threshold, nms_threshold, indices, 1f, topK);
             }
 
-            Mat results = new Mat(indices.rows(), 6 + num_masks, CvType.CV_32FC1);
-
+            Mat results = new Mat(indices.rows(), 6 + num_kpts, CvType.CV_32FC1);
+            
             for (int i = 0; i < indices.rows(); ++i)
             {
                 int idx = (int)indices.get(i, 0)[0];
 
-                pickup_blob_numx6mask.row(idx).copyTo(results.row(i));
+                pickup_blob_numx6kpts.row(idx).copyTo(results.row(i));
 
                 float[] bbox_arr = new float[4];
                 boxesMat.get(idx, 0, bbox_arr);
@@ -311,129 +337,15 @@ namespace YOLOv8WithOpenCVForUnity
                 float h = bbox_arr[3];
                 results.put(i, 0, new float[] { x, y, x + w, y + h });
             }
-
+            
             indices.Dispose();
 
             // [
-            //   [xyxy, conf, cls, mask]
+            //   [xyxy, conf, cls, kptk]
             //   ...
-            //   [xyxy, conf, cls, mask]
+            //   [xyxy, conf, cls, kptk]
             // ]
             return results;
-        }
-
-        protected virtual Mat process_mask(Mat protos, Mat masks_in, Mat bboxes, Size shape, bool upsample = false)
-        {
-            if (masks_in.rows() < 1 || bboxes.rows() < 1)
-                return new Mat();
-
-            int c = protos.size(0);// 32
-            int mh = protos.size(1);// 160
-            int mw = protos.size(2);// 160
-
-            int ih = (int)shape.height;// 640
-            int iw = (int)shape.width;// 640
-
-            Mat masks_nxmhmw = new Mat();
-
-            using (Mat protos_cxmhmw = protos.reshape(1, c))
-            {
-                Core.gemm(masks_in, protos_cxmhmw, 1, new Mat(), 0, masks_nxmhmw);
-            }
-
-            sigmoid(masks_nxmhmw);
-
-            Mat masks = masks_nxmhmw.reshape(1, new int[] { masks_in.rows(), mh, mw });
-
-            using (Mat downsampled_bboxes = bboxes.clone())
-            using (Mat db_c4 = downsampled_bboxes.reshape(4, downsampled_bboxes.rows()))
-            {
-                Core.multiply(db_c4, new Scalar((float)mw / iw, (float)mh / ih, (float)mw / iw, (float)mh / ih), db_c4);
-
-                crop_mask(masks, downsampled_bboxes);//[3, 160, 160]
-            }
-
-            if (upsample)
-            {
-                int masks_n = masks.size(0);// 3
-                int masks_h = masks.size(1);// 160
-                int masks_w = masks.size(2);// 160
-
-                Mat upsample_masks = new Mat(new int[] { masks_n, ih, iw }, CvType.CV_8UC1);// [n, 640, 640]
-
-                if (upsample_masks_1xihiw_32FC1 == null)
-                    upsample_masks_1xihiw_32FC1 = new Mat(1, ih * iw, CvType.CV_32FC1);// [1, 409600]
-
-                for (int i = 0; i < masks_n; ++i)
-                {
-                    Mat m_ihiw = masks.row(i).reshape(1, masks_h);// [1, 25600] => [160, 160]
-                    Mat um_ihxiw_32FC1 = upsample_masks_1xihiw_32FC1.reshape(1, ih);// [1, 409600] => [640, 640]
-                    Imgproc.resize(m_ihiw, um_ihxiw_32FC1, new Size(iw, ih), -1, -1, Imgproc.INTER_LINEAR);
-
-                    Imgproc.threshold(upsample_masks_1xihiw_32FC1, upsample_masks_1xihiw_32FC1, 0.5f, 1f, Imgproc.THRESH_BINARY);
-
-                    Mat um_1xihiw = upsample_masks.row(i).reshape(1, 1);// [1, 409600]
-                    upsample_masks_1xihiw_32FC1.convertTo(um_1xihiw, CvType.CV_8U, 255.0);
-                }
-                masks.Dispose();
-                masks_nxmhmw.Dispose();
-
-                return upsample_masks;// [n, ih, iw]
-            }
-            else
-            {
-                Imgproc.threshold(masks_nxmhmw, masks_nxmhmw, 0.5f, 1f, Imgproc.THRESH_BINARY);
-
-                Mat masks_8UC1 = new Mat();
-                masks.convertTo(masks_8UC1, CvType.CV_8U, 255.0);
-
-                masks.Dispose();
-                masks_nxmhmw.Dispose();
-
-                return masks_8UC1;// [n, 160, 160]
-            }
-        }
-
-        protected virtual void sigmoid(Mat mat)
-        {
-            //python: 1 / (1 + np.exp(-x))
-
-            Core.multiply(mat, Scalar.all(-1), mat);
-            Core.exp(mat, mat);
-            Core.add(mat, Scalar.all(1f), mat);
-            using (Mat _mat = new Mat(mat.size(), mat.type(), Scalar.all(1f)))
-            {
-                Core.divide(_mat, mat, mat);
-            }
-        }
-
-        protected virtual Mat crop_mask(Mat masks, Mat boxes)
-        {
-            int n = masks.size(0);// 3
-            int h = masks.size(1);// 160
-            int w = masks.size(2);// 160
-
-            if (all_0 == null)
-                all_0 = new Mat(h, w, CvType.CV_32FC1, Scalar.all(0f));// [n, 160, 160]
-
-            if (c_mask == null)
-                c_mask = new Mat(h, w, CvType.CV_8UC1);// [n, 160, 160]
-
-            using (Mat masks_nxhw = masks.reshape(1, n))// [n, 160, 160] => [n, 25600]
-            {
-                for (int i = 0; i < n; ++i)
-                {
-                    float[] b_arr = new float[4];
-                    boxes.row(i).get(0, 0, b_arr);
-                    Imgproc.rectangle(c_mask, new OpenCVRect(0, 0, w, h), Scalar.all(1), -1);
-                    Imgproc.rectangle(c_mask, new Point(b_arr[0], b_arr[1]), new Point(b_arr[2], b_arr[3]), Scalar.all(0), -1);
-
-                    Mat m_hxw = masks_nxhw.row(i).reshape(1, h);// [1, 25600] => [160, 160]
-                    all_0.copyTo(m_hxw, c_mask);
-                }
-            }
-
-            return masks;// [n, 160, 160]
         }
 
         public virtual void visualize(Mat image, Mat results, bool print_results = false, bool isRGB = false)
@@ -491,97 +403,98 @@ namespace YOLOv8WithOpenCVForUnity
             }
         }
 
-        public virtual void visualize_mask(Mat image, Mat det, Mat masks, float alpha = 0.5f, bool isRGB = false)
+        public virtual void visualize_kpts(Mat image, Mat kpts, int radius = 5, bool kpt_line= true,  bool isRGB = false)
         {
+            // Note: `kpt_line = True` currently only supports human pose plotting.
+
             if (image.IsDisposed)
                 return;
 
-            if (det.empty() || det.cols() < 6)
+            if (kpts.empty())
                 return;
 
-            if (masks.empty())
-                return;
+            bool is_pose = false;
+            if (kpts.cols() == 17 * 3)
+                is_pose = true;
 
-            int n = masks.size(0);
-            int h = masks.size(1);
-            int w = masks.size(2);
+            kpt_line &= is_pose;  //# `kpt_line=True` for now only supports human pose plotting
 
-            float maxSize = Mathf.Max((float)image.size().width, (float)image.size().height);
-            int mask_w = (int)(w * image.width() / maxSize);
-            int mask_h = (int)(h * image.height() / maxSize);
-            int mask_pad_x = (int)((w - mask_w) / 2f);
-            int mask_pad_y = (int)((h - mask_h) / 2f);
+            float[] landmarks = new float[kpts.cols()];
 
-            if (maskMat == null)
-                maskMat = new Mat(image.size(), image.type());
-            if (maskMat.width() != image.width() || maskMat.height() != image.height())
-                maskMat.create(image.size(), image.type());
-            if (colorMat == null)
-                colorMat = new Mat(image.size(), image.type());
-            if (colorMat.width() != image.width() || colorMat.height() != image.height())
-                colorMat.create(image.size(), image.type());
-
-            using (Mat masks_nxhw = masks.reshape(1, n))// [n, 160, 160] => [n, 25600]
+            for (int i = 0; i < kpts.rows(); ++i)
             {
-                for (int i = n - 1; i >= 0; --i)
+                kpts.get(i, 0, landmarks);
+
+                // draw points
+                int k_ind = 0;
+                for (int j = 0; j < landmarks.Length; j += 3)
                 {
+                    Scalar c = is_pose ? pose_palette[kpt_color_ind[k_ind]] : palette[k_ind % palette.Count];
+                    Scalar color_k = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
+                    k_ind++;
 
-                    float[] cls = new float[1];
-                    det.get(i, 5, cls);
-                    int classId = (int)cls[0];
-                    Scalar c = palette[classId % palette.Count];
-                    Scalar color = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
+                    float x_coord = landmarks[j];
+                    float y_coord = landmarks[j + 1];
 
-                    Mat m_hxw = masks_nxhw.row(i).reshape(1, h);// [1, 25600] => [160, 160]
-                    Mat m_hxw_roi = new Mat(m_hxw, new OpenCVRect(mask_pad_x, mask_pad_y, mask_w, mask_h));
-                    Imgproc.resize(m_hxw_roi, maskMat, image.size(), -1, -1, Imgproc.INTER_LINEAR);
+                    if (x_coord % image.width() != 0 && y_coord % image.height() != 0)
+                    {
+                        float conf = landmarks[j + 2];
+                        if (conf < 0.5)
+                            continue;
 
+                        Imgproc.circle(image, new Point(x_coord, y_coord), radius, color_k, -1, Imgproc.LINE_AA);
+                    }
+                }
 
-                    //
-                    Imgproc.rectangle(colorMat, new OpenCVRect(0, 0, colorMat.width(), colorMat.height()), color, -1);
-                    Core.addWeighted(colorMat, alpha, image, alpha, 0, colorMat);
-                    colorMat.copyTo(image, maskMat);
-                    //
-                    // or
-                    ////// use ROI
-                    //float[] box = new float[4];
-                    //det.get(i, 0, box);
-                    //float left = box[0];
-                    //float top = box[1];
-                    //float right = box[2];
-                    //float bottom = box[3];
-                    //OpenCVRect roi_rect = new OpenCVRect((int)left, (int)top, (int)(right - left), (int)(bottom - top));
-                    //roi_rect = new OpenCVRect(0, 0, image.width(), image.height()).intersect(roi_rect);
+                // draw lines
+                if (kpt_line)
+                {
+                    for (int p = 0; p < skeleton.GetLength(0); p++)
+                    {
+                        int pos1_ind = (skeleton[p, 0] - 1) * 3;
+                        float pos1_x = landmarks[pos1_ind];
+                        float pos1_y = landmarks[pos1_ind + 1];
+                        float conf1 = landmarks[pos1_ind + 2];
 
-                    //using (Mat maskMat_roi = new Mat(maskMat, roi_rect))
-                    //using (Mat colorMat_roi = new Mat(colorMat, roi_rect))
-                    //using (Mat image_roi = new Mat(image, roi_rect))
-                    //{
-                    //    Imgproc.rectangle(colorMat_roi, new OpenCVRect(0, 0, colorMat_roi.width(), colorMat_roi.height()), color, -1);
-                    //    Core.addWeighted(colorMat_roi, alpha, image_roi, alpha, 0, colorMat_roi);
-                    //    colorMat_roi.copyTo(image_roi, maskMat_roi);
-                    //}
-                    //
+                        int pos2_ind = (skeleton[p, 1] - 1) * 3;
+                        float pos2_x = landmarks[pos2_ind];
+                        float pos2_y = landmarks[pos2_ind + 1];
+                        float conf2 = landmarks[pos2_ind + 2];
+
+                        if (conf1 < 0.5f || conf2 < 0.5f)
+                            continue;
+
+                        if (pos1_x % image.width() == 0 || pos1_y % image.height() == 0 || pos1_x < 0 || pos1_y < 0)
+                            continue;
+
+                        if (pos2_x % image.width() == 0 || pos2_y % image.height() == 0 || pos2_x < 0 || pos2_y < 0)
+                            continue;
+
+                        Scalar c = pose_palette[limb_color_ind[p]];
+                        Scalar color_k = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
+
+                        Imgproc.line(image, new Point(pos1_x, pos1_y), new Point(pos2_x, pos2_y), color_k, 2, Imgproc.LINE_AA);
+                    }
                 }
             }
         }
 
         public virtual void dispose()
         {
-            if (segmentation_net != null)
-                segmentation_net.Dispose();
+            if (object_detection_net != null)
+                object_detection_net.Dispose();
 
             if (maxSizeImg != null)
                 maxSizeImg.Dispose();
 
             maxSizeImg = null;
 
-            if (pickup_blob_numx6mask != null)
-                pickup_blob_numx6mask.Dispose();
+            if (pickup_blob_numx6kpts != null)
+                pickup_blob_numx6kpts.Dispose();
             if (boxesMat != null)
                 boxesMat.Dispose();
 
-            pickup_blob_numx6mask = null;
+            pickup_blob_numx6kpts = null;
             boxesMat = null;
 
             if (boxes_m_c4 != null)
@@ -603,27 +516,6 @@ namespace YOLOv8WithOpenCVForUnity
             boxes = null;
             confidences = null;
             class_ids = null;
-
-            if (all_0 != null)
-                all_0.Dispose();
-            if (c_mask != null)
-                c_mask.Dispose();
-
-            all_0 = null;
-            c_mask = null;
-
-            if (upsample_masks_1xihiw_32FC1 != null)
-                upsample_masks_1xihiw_32FC1.Dispose();
-
-            upsample_masks_1xihiw_32FC1 = null;
-
-            if (maskMat != null)
-                maskMat.Dispose();
-            if (colorMat != null)
-                colorMat.Dispose();
-
-            maskMat = null;
-            colorMat = null;
         }
 
         protected virtual List<string> readClassNames(string filename)
@@ -654,7 +546,6 @@ namespace YOLOv8WithOpenCVForUnity
 
             return classNames;
         }
-
 
         [StructLayout(LayoutKind.Sequential)]
         public readonly struct DetectionData
