@@ -35,7 +35,7 @@ namespace YOLOv8WithOpenCVForUnity
         int[] limb_color_ind;
         int[] kpt_color_ind;
 
-        Mat maxSizeImg;
+        Mat paddedImg;
 
         Mat pickup_blob_numx6kpts;
         Mat boxesMat;
@@ -123,20 +123,26 @@ namespace YOLOv8WithOpenCVForUnity
 
         protected virtual Mat preprocess(Mat image)
         {
-            // Add padding to make it square.
-            int max = Mathf.Max(image.cols(), image.rows());
+            // https://github.com/ultralytics/ultralytics/blob/d74a5a9499acf1afd13d970645e5b1cfcadf4a8f/ultralytics/data/augment.py#L645
 
-            if (maxSizeImg == null)
-                maxSizeImg = new Mat(max, max, image.type());
-            if (maxSizeImg.width() != max || maxSizeImg.height() != max)
-                maxSizeImg.create(max, max, image.type());
+            // Add padding to make it input size.
+            // (padding to center the image)
+            float ratio = Mathf.Max((float)image.cols() / (float)input_size.width, (float)image.rows() / (float)input_size.height);
+            int padw = (int)Mathf.Ceil((float)input_size.width * ratio);
+            int padh = (int)Mathf.Ceil((float)input_size.height * ratio);
 
-            Imgproc.rectangle(maxSizeImg, new OpenCVRect(0, 0, maxSizeImg.width(), maxSizeImg.height()), Scalar.all(114), -1);
-            Mat _maxSizeImg_roi = new Mat(maxSizeImg, new OpenCVRect((max - image.cols()) / 2, (max - image.rows()) / 2, image.cols(), image.rows()));
-            image.copyTo(_maxSizeImg_roi);
+            if (paddedImg == null)
+                paddedImg = new Mat(padh, padw, image.type(), Scalar.all(114));
+            if (paddedImg.width() != padw || paddedImg.height() != padh)
+            {
+                paddedImg.create(padh, padw, image.type());
+                Imgproc.rectangle(paddedImg, new OpenCVRect(0, 0, paddedImg.width(), paddedImg.height()), Scalar.all(114), -1);
+            }
 
-            // Create a 4D blob from a frame.
-            Mat blob = Dnn.blobFromImage(maxSizeImg, 1.0 / 255.0, input_size, Scalar.all(0), true, false, CvType.CV_32F); // HWC to NCHW, BGR to RGB
+            Mat _paddedImg_roi = new Mat(paddedImg, new OpenCVRect((paddedImg.cols() - image.cols()) / 2, (paddedImg.rows() - image.rows()) / 2, image.cols(), image.rows()));
+            image.copyTo(_paddedImg_roi);
+
+            Mat blob = Dnn.blobFromImage(paddedImg, 1.0 / 255.0, input_size, Scalar.all(0), true, false, CvType.CV_32F); // HWC to NCHW, BGR to RGB
 
             return blob;// [1, 3, h, w]
         }
@@ -165,11 +171,11 @@ namespace YOLOv8WithOpenCVForUnity
             // scale_boxes and scale_landmarks
             Mat det_c0_c6 = det.colRange(0, 6).clone();
             Mat kpts = det.colRange(6, 6 + num_kpts).clone();
-            float maxSize = Mathf.Max((float)image.size().width, (float)image.size().height);
-            float x_factor = maxSize / (float)input_size.width;
-            float y_factor = maxSize / (float)input_size.height;
-            float x_shift = (maxSize - (float)image.size().width) / 2f;
-            float y_shift = (maxSize - (float)image.size().height) / 2f;
+            float ratio = Mathf.Max((float)image.cols() / (float)input_size.width, (float)image.rows() / (float)input_size.height);
+            float x_factor = ratio;
+            float y_factor = ratio;
+            float x_shift = ((float)input_size.width * ratio - (float)image.size().width) / 2f;
+            float y_shift = ((float)input_size.height * ratio - (float)image.size().height) / 2f;
 
             for (int i = 0; i < det.rows(); ++i)
             {
@@ -222,8 +228,14 @@ namespace YOLOv8WithOpenCVForUnity
             MatOfInt order = new MatOfInt(0, 2, 1);
             Core.transposeND(output_blob_0, order, output_blob_0);
 
-            if (output_blob_0.size(2) < 4 + num_classes + num_kpts)
-                return new Mat();
+            if (output_blob_0.size(2) != 4 + num_classes + num_kpts)
+            {
+                Debug.LogWarning("The number of classes and output shapes are different. " +
+                                "( output_blob_0.size(2):" + output_blob_0.size(2) + " != 4 + num_classes:" + num_classes + " + " + num_kpts + " )\n" +
+                                "When using a custom model, be sure to set the correct number of classes by loading the appropriate custom classesFile.");
+
+                num_classes = output_blob_0.size(2) - 4 - num_kpts;
+            }
 
             int num = output_blob_0.size(1);
             Mat output_blob_numx56 = output_blob_0.reshape(1, num);
@@ -322,7 +334,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
 
             Mat results = new Mat(indices.rows(), 6 + num_kpts, CvType.CV_32FC1);
-            
+
             for (int i = 0; i < indices.rows(); ++i)
             {
                 int idx = (int)indices.get(i, 0)[0];
@@ -337,7 +349,7 @@ namespace YOLOv8WithOpenCVForUnity
                 float h = bbox_arr[3];
                 results.put(i, 0, new float[] { x, y, x + w, y + h });
             }
-            
+
             indices.Dispose();
 
             // [
@@ -403,7 +415,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
         }
 
-        public virtual void visualize_kpts(Mat image, Mat kpts, int radius = 5, bool kpt_line= true,  bool isRGB = false)
+        public virtual void visualize_kpts(Mat image, Mat kpts, int radius = 5, bool kpt_line = true, bool isRGB = false)
         {
             // Note: `kpt_line = True` currently only supports human pose plotting.
 
@@ -484,10 +496,10 @@ namespace YOLOv8WithOpenCVForUnity
             if (object_detection_net != null)
                 object_detection_net.Dispose();
 
-            if (maxSizeImg != null)
-                maxSizeImg.Dispose();
+            if (paddedImg != null)
+                paddedImg.Dispose();
 
-            maxSizeImg = null;
+            paddedImg = null;
 
             if (pickup_blob_numx6kpts != null)
                 pickup_blob_numx6kpts.Dispose();
@@ -593,7 +605,7 @@ namespace YOLOv8WithOpenCVForUnity
             string className = string.Empty;
             if (classNames != null && classNames.Count != 0)
             {
-                if (classId >= 0 && classId < (int)classNames.Count)
+                if (classId >= 0 && classId < classNames.Count)
                 {
                     className = classNames[classId];
                 }

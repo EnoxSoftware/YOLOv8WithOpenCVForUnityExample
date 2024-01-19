@@ -19,7 +19,6 @@ namespace YOLOv8WithOpenCVForUnityExample
     /// <summary>
     /// YOLOv8 Pose Estimation Example
     /// Referring to https://github.com/ultralytics/ultralytics/
-    /// https://github.com/ultralytics/ultralytics/tree/main/examples/YOLOv8-OpenCV-ONNX-Python
     /// </summary>
     [RequireComponent(typeof(WebCamTextureToMatHelper))]
     public class YOLOv8PoseEstimationExample : MonoBehaviour
@@ -148,7 +147,7 @@ namespace YOLOv8WithOpenCVForUnityExample
 
             if (string.IsNullOrEmpty(model_filepath))
             {
-                Debug.LogError("model: " + model + " or " + " is not loaded.");
+                Debug.LogError("model: " + model + " is not loaded.");
             }
             else
             {

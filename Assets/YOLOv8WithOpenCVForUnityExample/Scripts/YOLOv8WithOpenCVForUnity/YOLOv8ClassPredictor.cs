@@ -72,9 +72,9 @@ namespace YOLOv8WithOpenCVForUnity
 
         protected virtual Mat preprocess(Mat image)
         {
-            
-            // Create a 4D blob from a frame.
+            // https://github.com/ultralytics/ultralytics/blob/d74a5a9499acf1afd13d970645e5b1cfcadf4a8f/ultralytics/data/augment.py#L1059
 
+            // Resizes and crops the center of the image using a letterbox method.
             int c = image.channels();
             int h = (int)input_size.height;
             int w = (int)input_size.width;
@@ -93,7 +93,6 @@ namespace YOLOv8WithOpenCVForUnity
             Mat blob = Dnn.blobFromImage(input_sizeMat, 1.0 / 255.0, input_size, Scalar.all(0), true, false, CvType.CV_32F); // HWC to NCHW, BGR to RGB
 
             return blob;// [1, 3, h, w]
-
         }
 
         public virtual Mat infer(Mat image)
@@ -154,7 +153,7 @@ namespace YOLOv8WithOpenCVForUnity
             if (image.IsDisposed)
                 return;
 
-            if (results.empty() || results.cols() < classNames.Count)
+            if (results.empty())
                 return;
 
             StringBuilder sb = null;
@@ -308,7 +307,7 @@ namespace YOLOv8WithOpenCVForUnity
             string className = string.Empty;
             if (classNames != null && classNames.Count != 0)
             {
-                if (classId >= 0 && classId < (int)classNames.Count)
+                if (classId >= 0 && classId < classNames.Count)
                 {
                     className = classNames[classId];
                 }
