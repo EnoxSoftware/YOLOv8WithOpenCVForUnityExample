@@ -1,6 +1,7 @@
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
+using OpenCVForUnity.UnityUtils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -159,11 +160,11 @@ namespace YOLOv8WithOpenCVForUnity
             StringBuilder sb = null;
 
             if (print_results)
-                sb = new StringBuilder();
+                sb = new StringBuilder(64);
 
             ClassificationData bmData = getBestMatchData(results);
             int classId = (int)bmData.cls;
-            string label = getClassLabel(bmData.cls) + ", " + String.Format("{0:0.00}", bmData.conf);
+            string label = getClassLabel(bmData.cls) + ", " + bmData.conf.ToString("F2");
 
             Scalar c = palette[classId % palette.Count];
             Scalar color = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
@@ -182,11 +183,11 @@ namespace YOLOv8WithOpenCVForUnity
             // Print results
             if (print_results)
             {
-                sb.AppendLine(String.Format("Best match: " + getClassLabel(bmData.cls) + ", " + bmData));
+                sb.AppendLine("Best match: " + getClassLabel(bmData.cls) + ", " + bmData.ToString());
             }
 
             if (print_results)
-                Debug.Log(sb);
+                Debug.Log(sb.ToString());
         }
 
         public virtual void dispose()
@@ -251,7 +252,7 @@ namespace YOLOv8WithOpenCVForUnity
 
             public override string ToString()
             {
-                return "cls:" + cls + " conf:" + conf;
+                return "cls:" + cls.ToString() + " conf:" + conf.ToString();
             }
         };
 
@@ -273,7 +274,7 @@ namespace YOLOv8WithOpenCVForUnity
             results_numx1.copyTo(getDataMat.col(1));
 
             var dst = new ClassificationData[num];
-            OpenCVForUnity.UtilsModule.MatUtils.copyFromMat(getDataMat, dst);
+            MatUtils.copyFromMat(getDataMat, dst);
 
             return dst;
         }

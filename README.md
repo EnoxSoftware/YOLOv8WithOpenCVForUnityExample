@@ -6,7 +6,7 @@
 - Windows / Mac / Linux / WebGL / Android / iOS
 - Unity >= 2020.3.48f1+
 - Scripting backend MONO / IL2CPP
-- [OpenCV for Unity](https://assetstore.unity.com/packages/tools/integration/opencv-for-unity-21088?aid=1011l4ehR) 2.5.8+
+- [OpenCV for Unity](https://assetstore.unity.com/packages/tools/integration/opencv-for-unity-21088?aid=1011l4ehR) 2.5.9+
 
 
 ## Setup

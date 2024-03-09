@@ -1,6 +1,7 @@
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
+using OpenCVForUnity.UnityUtils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -46,6 +47,8 @@ namespace YOLOv8WithOpenCVForUnity
         MatOfRect2d boxes;
         MatOfFloat confidences;
         MatOfInt class_ids;
+
+        float[] landmarks_buffer;
 
         public YOLOv8PoseEstimater(string modelFilepath, string classesFilepath, Size inputSize, float confThreshold = 0.25f, float nmsThreshold = 0.45f, int topK = 300, int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
         {
@@ -384,7 +387,7 @@ namespace YOLOv8WithOpenCVForUnity
 
                 Imgproc.rectangle(image, new Point(left, top), new Point(right, bottom), color, 2);
 
-                string label = getClassLabel(classId) + ", " + String.Format("{0:0.00}", conf);
+                string label = $"{getClassLabel(classId)}, {conf:F2}";
 
                 int[] baseLine = new int[1];
                 Size labelSize = Imgproc.getTextSize(label, Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, 1, baseLine);
@@ -398,20 +401,24 @@ namespace YOLOv8WithOpenCVForUnity
             // Print results
             if (print_results)
             {
-                StringBuilder sb = new StringBuilder();
+                StringBuilder sb = new StringBuilder(512);
 
                 for (int i = 0; i < data.Length; ++i)
                 {
                     var d = data[i];
-                    string label = getClassLabel(d.cls) + ", " + String.Format("{0:0}", d.conf);
+                    string label = getClassLabel(d.cls);
 
-                    sb.AppendLine(String.Format("-----------object {0}-----------", i + 1));
-                    sb.AppendLine(String.Format("conf: {0:0.0000}", d.conf));
-                    sb.AppendLine(String.Format("cls: {0:0}", label));
-                    sb.AppendLine(String.Format("box: {0:0} {1:0} {2:0} {3:0}", d.x1, d.y1, d.x2, d.y2));
+                    sb.AppendFormat("-----------object {0}-----------", i + 1);
+                    sb.AppendLine();
+                    sb.AppendFormat("conf: {0:F4}", d.conf);
+                    sb.AppendLine();
+                    sb.Append("cls: ").Append(label);
+                    sb.AppendLine();
+                    sb.AppendFormat("box: {0:F0} {1:F0} {2:F0} {3:F0}", d.x1, d.y1, d.x2, d.y2);
+                    sb.AppendLine();
                 }
 
-                Debug.Log(sb);
+                Debug.Log(sb.ToString());
             }
         }
 
@@ -431,26 +438,27 @@ namespace YOLOv8WithOpenCVForUnity
 
             kpt_line &= is_pose;  //# `kpt_line=True` for now only supports human pose plotting
 
-            float[] landmarks = new float[kpts.cols()];
+            if (landmarks_buffer == null)
+                landmarks_buffer = new float[kpts.cols()];
 
             for (int i = 0; i < kpts.rows(); ++i)
             {
-                kpts.get(i, 0, landmarks);
+                kpts.get(i, 0, landmarks_buffer);
 
                 // draw points
                 int k_ind = 0;
-                for (int j = 0; j < landmarks.Length; j += 3)
+                for (int j = 0; j < landmarks_buffer.Length; j += 3)
                 {
                     Scalar c = is_pose ? pose_palette[kpt_color_ind[k_ind]] : palette[k_ind % palette.Count];
                     Scalar color_k = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
                     k_ind++;
 
-                    float x_coord = landmarks[j];
-                    float y_coord = landmarks[j + 1];
+                    float x_coord = landmarks_buffer[j];
+                    float y_coord = landmarks_buffer[j + 1];
 
                     if (x_coord % image.width() != 0 && y_coord % image.height() != 0)
                     {
-                        float conf = landmarks[j + 2];
+                        float conf = landmarks_buffer[j + 2];
                         if (conf < 0.5)
                             continue;
 
@@ -464,14 +472,14 @@ namespace YOLOv8WithOpenCVForUnity
                     for (int p = 0; p < skeleton.GetLength(0); p++)
                     {
                         int pos1_ind = (skeleton[p, 0] - 1) * 3;
-                        float pos1_x = landmarks[pos1_ind];
-                        float pos1_y = landmarks[pos1_ind + 1];
-                        float conf1 = landmarks[pos1_ind + 2];
+                        float pos1_x = landmarks_buffer[pos1_ind];
+                        float pos1_y = landmarks_buffer[pos1_ind + 1];
+                        float conf1 = landmarks_buffer[pos1_ind + 2];
 
                         int pos2_ind = (skeleton[p, 1] - 1) * 3;
-                        float pos2_x = landmarks[pos2_ind];
-                        float pos2_y = landmarks[pos2_ind + 1];
-                        float conf2 = landmarks[pos2_ind + 2];
+                        float pos2_x = landmarks_buffer[pos2_ind];
+                        float pos2_y = landmarks_buffer[pos2_ind + 1];
+                        float conf2 = landmarks_buffer[pos2_ind + 2];
 
                         if (conf1 < 0.5f || conf2 < 0.5f)
                             continue;
@@ -584,7 +592,7 @@ namespace YOLOv8WithOpenCVForUnity
 
             public override string ToString()
             {
-                return "x1:" + x1 + " y1:" + y1 + "x2:" + x2 + " y2:" + y2 + " conf:" + conf + "  cls:" + cls;
+                return "x1:" + x1.ToString() + " y1:" + y1.ToString() + "x2:" + x2.ToString() + " y2:" + y2.ToString() + " conf:" + conf.ToString() + "  cls:" + cls.ToString();
             }
         };
 
@@ -594,7 +602,7 @@ namespace YOLOv8WithOpenCVForUnity
                 return new DetectionData[0];
 
             var dst = new DetectionData[results.rows()];
-            OpenCVForUnity.UtilsModule.MatUtils.copyFromMat(results, dst);
+            MatUtils.copyFromMat(results, dst);
 
             return dst;
         }
