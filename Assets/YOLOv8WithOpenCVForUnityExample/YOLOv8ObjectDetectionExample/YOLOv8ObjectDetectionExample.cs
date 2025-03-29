@@ -2,19 +2,15 @@
 
 #if !UNITY_WSA_10_0
 
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.ImgcodecsModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
-using YOLOv8WithOpenCVForUnity;
 using System.Threading;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using YOLOv8WithOpenCVForUnity;
 
 namespace YOLOv8WithOpenCVForUnityExample
 {
@@ -207,15 +203,16 @@ namespace YOLOv8WithOpenCVForUnityExample
                     //TickMeter tm = new TickMeter();
                     //tm.start();
 
-                    Mat results = objectDetector.infer(bgrMat);
+                    Mat results = objectDetector.Infer(bgrMat);
 
                     //tm.stop();
                     //Debug.Log("YOLOv8ObjectDetector Inference time (preprocess + infer + postprocess), ms: " + tm.getTimeMilli());
 
                     Imgproc.cvtColor(bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
 
-                    objectDetector.visualize(rgbaMat, results, false, true);
+                    objectDetector.Visualize(rgbaMat, results, false, true);
 
+                    results.Dispose();
                 }
 
                 Utils.matToTexture2D(rgbaMat, texture);
@@ -230,7 +227,7 @@ namespace YOLOv8WithOpenCVForUnityExample
             multiSource2MatHelper.Dispose();
 
             if (objectDetector != null)
-                objectDetector.dispose();
+                objectDetector.Dispose();
 
             Utils.setDebugMode(false);
 

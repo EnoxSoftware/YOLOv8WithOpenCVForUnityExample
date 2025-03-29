@@ -2,19 +2,16 @@
 
 #if !UNITY_WSA_10_0
 
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.ImgcodecsModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
-using YOLOv8WithOpenCVForUnity;
+using System.Collections.Generic;
 using System.Threading;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using YOLOv8WithOpenCVForUnity;
 
 namespace YOLOv8WithOpenCVForUnityExample
 {
@@ -209,16 +206,18 @@ namespace YOLOv8WithOpenCVForUnityExample
                     //TickMeter tm = new TickMeter();
                     //tm.start();
 
-                    List<Mat> results = segmentPredictor.infer(bgrMat);
+                    List<Mat> results = segmentPredictor.Infer(bgrMat);
 
                     //tm.stop();
                     //Debug.Log("YOLOv8SegmentPredictor Inference time (preprocess + infer + postprocess), ms: " + tm.getTimeMilli());
 
                     Imgproc.cvtColor(bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
 
-                    segmentPredictor.visualize_mask(rgbaMat, results[0], results[1], 0.5f, true);
-                    segmentPredictor.visualize(rgbaMat, results[0], false, true);
+                    segmentPredictor.VisualizeMask(rgbaMat, results[0], results[1], 0.5f, true);
+                    segmentPredictor.Visualize(rgbaMat, results[0], false, true);
 
+                    foreach (var result in results)
+                        result.Dispose();
                 }
 
                 Utils.matToTexture2D(rgbaMat, texture);
@@ -233,7 +232,7 @@ namespace YOLOv8WithOpenCVForUnityExample
             multiSource2MatHelper.Dispose();
 
             if (segmentPredictor != null)
-                segmentPredictor.dispose();
+                segmentPredictor.Dispose();
 
             Utils.setDebugMode(false);
 

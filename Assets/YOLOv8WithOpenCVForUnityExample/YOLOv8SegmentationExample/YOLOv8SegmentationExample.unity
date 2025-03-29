@@ -1023,13 +1023,14 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e564a549956aebc4d9acef3ff91b0981, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _requestedSource2MatHelperClassName: 0
-  _currentSource2MatHelperClassCategory: 0
+  _requestedSource2MatHelperClassName: 2
+  _currentSource2MatHelperClassInterfaces: 2
   _requestedDeviceName: 
   _requestedWidth: 640
   _requestedHeight: 480
   _requestedIsFrontFacing: 0
   _requestedFPS: 30
+  _requestedMatUpdateFPS: 30
   _requestedVideoFilePath: YOLOv8WithOpenCVForUnityExample\TestVideos\ObjectDetection_TestVideo_640_640_30fps.mp4
   _loop: 1
   _requestedImageFilePath: 

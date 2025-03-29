@@ -2,20 +2,16 @@
 
 #if !UNITY_WSA_10_0
 
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.ImgcodecsModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
-using YOLOv8WithOpenCVForUnity;
 using System.Text;
 using System.Threading;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using YOLOv8WithOpenCVForUnity;
 
 namespace YOLOv8WithOpenCVForUnityExample
 {
@@ -198,26 +194,27 @@ namespace YOLOv8WithOpenCVForUnityExample
                     //TickMeter tm = new TickMeter();
                     //tm.start();
 
-                    Mat results = classPredictor.infer(bgrMat);
+                    Mat results = classPredictor.Infer(bgrMat);
 
                     //tm.stop();
                     //Debug.Log("YOLOv8ClassPredictor Inference time (preprocess + infer + postprocess), ms: " + tm.getTimeMilli());
 
                     Imgproc.cvtColor(bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
 
-                    classPredictor.visualize(rgbaMat, results, false, true);
+                    classPredictor.Visualize(rgbaMat, results, false, true);
 
                     if (fpsMonitor != null)
                     {
-                        var sortedData = classPredictor.getSortedData(results, 5);
+                        var sortedData = classPredictor.GetSortedData(results, 5);
                         StringBuilder sb = new StringBuilder();
                         for (int i = 0; i < sortedData.Length; ++i)
                         {
-                            sb.AppendLine((i + 1) + ". " + classPredictor.getClassLabel(sortedData[i].cls) + ", " + sortedData[i]);
+                            sb.AppendLine((i + 1) + ". " + classPredictor.GetClassLabel(sortedData[i].cls) + ", " + sortedData[i]);
                         }
                         fpsMonitor.consoleText = sb.ToString();
                     }
 
+                    results.Dispose();
                 }
 
                 Utils.matToTexture2D(rgbaMat, texture);
@@ -232,7 +229,7 @@ namespace YOLOv8WithOpenCVForUnityExample
             multiSource2MatHelper.Dispose();
 
             if (classPredictor != null)
-                classPredictor.dispose();
+                classPredictor.Dispose();
 
             Utils.setDebugMode(false);
 

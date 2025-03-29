@@ -12,8 +12,10 @@ using OpenCVRect = OpenCVForUnity.CoreModule.Rect;
 
 namespace YOLOv8WithOpenCVForUnity
 {
-
-    public class YOLOv8ClassPredictor
+    /// <summary>
+    /// Referring to https://github.com/ultralytics/ultralytics/
+    /// </summary>
+    public class YOLOv8ClassPredictor : IDisposable
     {
         Size input_size;
         int backend;
@@ -38,7 +40,7 @@ namespace YOLOv8WithOpenCVForUnity
 
             if (!string.IsNullOrEmpty(classesFilepath))
             {
-                classNames = readClassNames(classesFilepath);
+                classNames = ReadClassNames(classesFilepath);
             }
 
             input_size = new Size(inputSize.width > 0 ? inputSize.width : 224, inputSize.height > 0 ? inputSize.height : 224);
@@ -71,7 +73,7 @@ namespace YOLOv8WithOpenCVForUnity
             palette.Add(new Scalar(255, 55, 199, 255));
         }
 
-        protected virtual Mat preprocess(Mat image)
+        protected virtual Mat PreProcess(Mat image)
         {
             // https://github.com/ultralytics/ultralytics/blob/d74a5a9499acf1afd13d970645e5b1cfcadf4a8f/ultralytics/data/augment.py#L1059
 
@@ -96,7 +98,7 @@ namespace YOLOv8WithOpenCVForUnity
             return blob;// [1, 3, h, w]
         }
 
-        public virtual Mat infer(Mat image)
+        public virtual Mat Infer(Mat image)
         {
             // cheack
             if (image.channels() != 3)
@@ -106,7 +108,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
 
             // Preprocess
-            Mat input_blob = preprocess(image);
+            Mat input_blob = PreProcess(image);
 
             // Forward
             classification_net.setInput(input_blob);
@@ -115,7 +117,7 @@ namespace YOLOv8WithOpenCVForUnity
             classification_net.forward(output_blob, classification_net.getUnconnectedOutLayersNames());
 
             // Postprocess
-            Mat results = postprocess(output_blob, image.size());
+            Mat results = PostProcess(output_blob, image.size());
 
             input_blob.Dispose();
             for (int i = 0; i < output_blob.Count; i++)
@@ -126,7 +128,7 @@ namespace YOLOv8WithOpenCVForUnity
             return results;// [1, num_classes]
         }
 
-        protected virtual Mat postprocess(List<Mat> output_blob, Size original_shape)
+        protected virtual Mat PostProcess(List<Mat> output_blob, Size original_shape)
         {
             Mat output_blob_0 = output_blob[0];
 
@@ -135,21 +137,7 @@ namespace YOLOv8WithOpenCVForUnity
             return results;// [1, num_classes]
         }
 
-        protected virtual Mat softmax(Mat src)
-        {
-            Mat dst = src.clone();
-
-            Core.MinMaxLocResult result = Core.minMaxLoc(src);
-            Scalar max = new Scalar(result.maxVal);
-            Core.subtract(src, max, dst);
-            Core.exp(dst, dst);
-            Scalar sum = Core.sumElems(dst);
-            Core.divide(dst, sum, dst);
-
-            return dst;
-        }
-
-        public virtual void visualize(Mat image, Mat results, bool print_results = false, bool isRGB = false)
+        public virtual void Visualize(Mat image, Mat results, bool print_results = false, bool isRGB = false)
         {
             if (image.IsDisposed)
                 return;
@@ -162,9 +150,9 @@ namespace YOLOv8WithOpenCVForUnity
             if (print_results)
                 sb = new StringBuilder(64);
 
-            ClassificationData bmData = getBestMatchData(results);
+            ClassificationData bmData = GetBestMatchData(results);
             int classId = (int)bmData.cls;
-            string label = getClassLabel(bmData.cls) + ", " + bmData.conf.ToString("F2");
+            string label = GetClassLabel(bmData.cls) + ", " + bmData.conf.ToString("F2");
 
             Scalar c = palette[classId % palette.Count];
             Scalar color = isRGB ? c : new Scalar(c.val[2], c.val[1], c.val[0], c.val[3]);
@@ -183,14 +171,14 @@ namespace YOLOv8WithOpenCVForUnity
             // Print results
             if (print_results)
             {
-                sb.AppendLine("Best match: " + getClassLabel(bmData.cls) + ", " + bmData.ToString());
+                sb.AppendLine("Best match: " + GetClassLabel(bmData.cls) + ", " + bmData.ToString());
             }
 
             if (print_results)
                 Debug.Log(sb.ToString());
         }
 
-        public virtual void dispose()
+        public virtual void Dispose()
         {
             if (classification_net != null)
                 classification_net.Dispose();
@@ -206,7 +194,7 @@ namespace YOLOv8WithOpenCVForUnity
             getDataMat = null;
         }
 
-        protected virtual List<string> readClassNames(string filename)
+        protected virtual List<string> ReadClassNames(string filename)
         {
             List<string> classNames = new List<string>();
 
@@ -235,14 +223,18 @@ namespace YOLOv8WithOpenCVForUnity
             return classNames;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
+        [Serializable]
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public readonly struct ClassificationData
         {
             public readonly float cls;
             public readonly float conf;
 
-            // sizeof(ClassificationData)
-            public const int Size = 2 * sizeof(float);
+            // Count of elements
+            public const int ELEMENT_COUNT = 2;
+
+            // sizeof(DetectionData)
+            public const int DATA_SIZE = ELEMENT_COUNT * sizeof(float);
 
             public ClassificationData(int cls, float conf)
             {
@@ -252,11 +244,13 @@ namespace YOLOv8WithOpenCVForUnity
 
             public override string ToString()
             {
-                return "cls:" + cls.ToString() + " conf:" + conf.ToString();
+                StringBuilder sb = new StringBuilder(64);
+                sb.AppendFormat("conf:{0} cls:{1}", conf, cls);
+                return sb.ToString();
             }
         };
 
-        public virtual ClassificationData[] getData(Mat results)
+        public virtual ClassificationData[] GetData(Mat results)
         {
             if (results.empty())
                 return new ClassificationData[0];
@@ -279,7 +273,7 @@ namespace YOLOv8WithOpenCVForUnity
             return dst;
         }
 
-        public virtual ClassificationData[] getSortedData(Mat results, int topK = 5)
+        public virtual ClassificationData[] GetSortedData(Mat results, int topK = 5)
         {
             if (results.empty())
                 return new ClassificationData[0];
@@ -287,12 +281,12 @@ namespace YOLOv8WithOpenCVForUnity
             int num = results.cols();
 
             if (topK < 1 || topK > num) topK = num;
-            var sortedData = getData(results).OrderByDescending(x => x.conf).Take(topK).ToArray();
+            var sortedData = GetData(results).OrderByDescending(x => x.conf).Take(topK).ToArray();
 
             return sortedData;
         }
 
-        public virtual ClassificationData getBestMatchData(Mat results)
+        public virtual ClassificationData GetBestMatchData(Mat results)
         {
             if (results.empty())
                 return new ClassificationData();
@@ -302,7 +296,7 @@ namespace YOLOv8WithOpenCVForUnity
             return new ClassificationData((int)minmax.maxLoc.x, (float)minmax.maxVal);
         }
 
-        public virtual string getClassLabel(float id)
+        public virtual string GetClassLabel(float id)
         {
             int classId = (int)id;
             string className = string.Empty;

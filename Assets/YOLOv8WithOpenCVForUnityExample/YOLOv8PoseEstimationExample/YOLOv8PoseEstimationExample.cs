@@ -2,19 +2,16 @@
 
 #if !UNITY_WSA_10_0
 
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-using UnityEngine.SceneManagement;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.ImgcodecsModule;
 using OpenCVForUnity.UnityUtils;
 using OpenCVForUnity.UnityUtils.Helper;
-using YOLOv8WithOpenCVForUnity;
+using System.Collections.Generic;
 using System.Threading;
+using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using YOLOv8WithOpenCVForUnity;
 
 namespace YOLOv8WithOpenCVForUnityExample
 {
@@ -207,16 +204,18 @@ namespace YOLOv8WithOpenCVForUnityExample
                     //TickMeter tm = new TickMeter();
                     //tm.start();
 
-                    List<Mat> results = poseEstimater.infer(bgrMat);
+                    List<Mat> results = poseEstimater.Infer(bgrMat);
 
                     //tm.stop();
                     //Debug.Log("YOLOv8PoseEstimater Inference time (preprocess + infer + postprocess), ms: " + tm.getTimeMilli());
 
                     Imgproc.cvtColor(bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
 
-                    poseEstimater.visualize_kpts(rgbaMat, results[1], 5, true, true);
-                    poseEstimater.visualize(rgbaMat, results[0], false, true);
+                    poseEstimater.VisualizeKpts(rgbaMat, results[1], 5, true, true);
+                    poseEstimater.Visualize(rgbaMat, results[0], false, true);
 
+                    foreach (var result in results)
+                        result.Dispose();
                 }
 
                 Utils.matToTexture2D(rgbaMat, texture);
@@ -231,7 +230,7 @@ namespace YOLOv8WithOpenCVForUnityExample
             multiSource2MatHelper.Dispose();
 
             if (poseEstimater != null)
-                poseEstimater.dispose();
+                poseEstimater.Dispose();
 
             Utils.setDebugMode(false);
 

@@ -1,12 +1,14 @@
 # YOLOv8 With OpenCVForUnity Example
 - An example of using OpenCV dnn module with YOLOv8. [https://github.com/ultralytics/ultralytics](https://github.com/ultralytics/ultralytics)
+- This example can also work for [YOLOv9](https://docs.ultralytics.com/models/yolov9/), ~~[YOLOv10](https://docs.ultralytics.com/models/yolov10/)~~, [YOLOv11](https://docs.ultralytics.com/models/yolov11/), [YOLOv12](https://docs.ultralytics.com/models/yolov12/) models, which has the same input/output shapes as the YOLOv8 model.
 
+![YOLOv8_output_shapes.png](YOLOv8_output_shapes.png) 
 
 ## Environment
 - Windows / Mac / Linux / WebGL / Android / iOS
 - Unity >= 2021.3.35f1+
 - Scripting backend MONO / IL2CPP
-- [OpenCV for Unity](https://assetstore.unity.com/packages/tools/integration/opencv-for-unity-21088?aid=1011l4ehR) 2.6.4+
+- [OpenCV for Unity](https://assetstore.unity.com/packages/tools/integration/opencv-for-unity-21088?aid=1011l4ehR) 2.6.5+
 
 
 ## Setup
@@ -19,7 +21,7 @@
 
 
 ## Export YOLOv8 model to ONNX
-1. [YOLOv8_export_to_OpenCVDNN_ONNX.ipynb](https://github.com/EnoxSoftware/YOLOv8WithOpenCVForUnityExample/tree/master/models/YOLOv8-OpenCV/YOLOv8_export_to_OpenCVDNN_ONNX.ipynb)
+1. [YOLOv8_export_to_OpenCVDNN_ONNX.ipynb](https://github.com/EnoxSoftware/YOLOv8WithOpenCVForUnityExample/tree/master/models/YOLOv8/YOLOv8_export_to_OpenCVDNN_ONNX.ipynb)
 
 
 ## Works with Multi-Object Tracking (MOT)

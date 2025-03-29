@@ -13,8 +13,10 @@ using OpenCVRect = OpenCVForUnity.CoreModule.Rect;
 
 namespace YOLOv8WithOpenCVForUnity
 {
-
-    public class YOLOv8SegmentPredictor
+    /// <summary>
+    /// Referring to https://github.com/ultralytics/ultralytics/
+    /// </summary>
+    public class YOLOv8SegmentPredictor : IDisposable
     {
         Size input_size;
         float conf_threshold;
@@ -61,7 +63,7 @@ namespace YOLOv8WithOpenCVForUnity
 
             if (!string.IsNullOrEmpty(classesFilepath))
             {
-                classNames = readClassNames(classesFilepath);
+                classNames = ReadClassNames(classesFilepath);
                 num_classes = classNames.Count;
             }
 
@@ -99,7 +101,7 @@ namespace YOLOv8WithOpenCVForUnity
             palette.Add(new Scalar(255, 55, 199, 255));
         }
 
-        protected virtual Mat preprocess(Mat image)
+        protected virtual Mat PreProcess(Mat image)
         {
             // https://github.com/ultralytics/ultralytics/blob/d74a5a9499acf1afd13d970645e5b1cfcadf4a8f/ultralytics/data/augment.py#L645
 
@@ -125,7 +127,7 @@ namespace YOLOv8WithOpenCVForUnity
             return blob;// [1, 3, h, w]
         }
 
-        public virtual List<Mat> infer(Mat image)
+        public virtual List<Mat> Infer(Mat image)
         {
             // cheack
             if (image.channels() != 3)
@@ -135,7 +137,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
 
             // Preprocess
-            Mat input_blob = preprocess(image);
+            Mat input_blob = PreProcess(image);
 
             // Forward
             segmentation_net.setInput(input_blob);
@@ -144,7 +146,7 @@ namespace YOLOv8WithOpenCVForUnity
             segmentation_net.forward(output_blob, segmentation_net.getUnconnectedOutLayersNames());
 
             // Postprocess
-            Mat det = postprocess(output_blob[0], image.size());
+            Mat det = PostProcess(output_blob[0], image.size());
 
             // process_mask
             Mat proto = output_blob[1];
@@ -193,7 +195,7 @@ namespace YOLOv8WithOpenCVForUnity
             return results;
         }
 
-        protected virtual Mat postprocess(Mat output_blob, Size original_shape)
+        protected virtual Mat PostProcess(Mat output_blob, Size original_shape)
         {
             Mat output_blob_0 = output_blob;
 
@@ -335,6 +337,8 @@ namespace YOLOv8WithOpenCVForUnity
 
         protected virtual Mat process_mask(Mat protos, Mat masks_in, Mat bboxes, Size shape, bool upsample = false)
         {
+            // python: https://github.com/ultralytics/ultralytics/blob/5c39f5ed8502e991dcbf6ba5f8f750206563e582/ultralytics/utils/ops.py#L680
+
             if (masks_in.rows() < 1 || bboxes.rows() < 1)
                 return new Mat();
 
@@ -407,7 +411,7 @@ namespace YOLOv8WithOpenCVForUnity
 
         protected virtual void sigmoid(Mat mat)
         {
-            //python: 1 / (1 + np.exp(-x))
+            // python: 1 / (1 + np.exp(-x))
 
             Core.multiply(mat, Scalar.all(-1), mat);
             Core.exp(mat, mat);
@@ -420,6 +424,8 @@ namespace YOLOv8WithOpenCVForUnity
 
         protected virtual Mat crop_mask(Mat masks, Mat boxes)
         {
+            // python: https://github.com/ultralytics/ultralytics/blob/5c39f5ed8502e991dcbf6ba5f8f750206563e582/ultralytics/utils/ops.py#L661
+
             int n = masks.size(0);// 3
             int h = masks.size(1);// 160
             int w = masks.size(2);// 160
@@ -447,7 +453,7 @@ namespace YOLOv8WithOpenCVForUnity
             return masks;// [n, 160, 160]
         }
 
-        public virtual void visualize(Mat image, Mat results, bool print_results = false, bool isRGB = false)
+        public virtual void Visualize(Mat image, Mat results, bool print_results = false, bool isRGB = false)
         {
             if (image.IsDisposed)
                 return;
@@ -455,7 +461,7 @@ namespace YOLOv8WithOpenCVForUnity
             if (results.empty() || results.cols() < 6)
                 return;
 
-            DetectionData[] data = getData(results);
+            DetectionData[] data = GetData(results);
 
             foreach (var d in data.Reverse())
             {
@@ -471,7 +477,7 @@ namespace YOLOv8WithOpenCVForUnity
 
                 Imgproc.rectangle(image, new Point(left, top), new Point(right, bottom), color, 2);
 
-                string label = $"{getClassLabel(classId)}, {conf:F2}";
+                string label = $"{GetClassLabel(classId)}, {conf:F2}";
 
                 int[] baseLine = new int[1];
                 Size labelSize = Imgproc.getTextSize(label, Imgproc.FONT_HERSHEY_SIMPLEX, 0.5, 1, baseLine);
@@ -490,7 +496,7 @@ namespace YOLOv8WithOpenCVForUnity
                 for (int i = 0; i < data.Length; ++i)
                 {
                     var d = data[i];
-                    string label = getClassLabel(d.cls);
+                    string label = GetClassLabel(d.cls);
 
                     sb.AppendFormat("-----------object {0}-----------", i + 1);
                     sb.AppendLine();
@@ -506,7 +512,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
         }
 
-        public virtual void visualize_mask(Mat image, Mat det, Mat masks, float alpha = 0.5f, bool isRGB = false)
+        public virtual void VisualizeMask(Mat image, Mat det, Mat masks, float alpha = 0.5f, bool isRGB = false)
         {
             if (image.IsDisposed)
                 return;
@@ -581,7 +587,7 @@ namespace YOLOv8WithOpenCVForUnity
             }
         }
 
-        public virtual void dispose()
+        public virtual void Dispose()
         {
             if (segmentation_net != null)
                 segmentation_net.Dispose();
@@ -641,7 +647,7 @@ namespace YOLOv8WithOpenCVForUnity
             colorMat = null;
         }
 
-        protected virtual List<string> readClassNames(string filename)
+        protected virtual List<string> ReadClassNames(string filename)
         {
             List<string> classNames = new List<string>();
 
@@ -671,7 +677,8 @@ namespace YOLOv8WithOpenCVForUnity
         }
 
 
-        [StructLayout(LayoutKind.Sequential)]
+        [Serializable]
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public readonly struct DetectionData
         {
             public readonly float x1;
@@ -681,8 +688,11 @@ namespace YOLOv8WithOpenCVForUnity
             public readonly float conf;
             public readonly float cls;
 
-            // sizeof(ClassificationData)
-            public const int Size = 6 * sizeof(float);
+            // Count of elements
+            public const int ELEMENT_COUNT = 6;
+
+            // sizeof(DetectionData)
+            public const int DATA_SIZE = ELEMENT_COUNT * sizeof(float);
 
             public DetectionData(int x1, int y1, int x2, int y2, float conf, int cls)
             {
@@ -696,11 +706,13 @@ namespace YOLOv8WithOpenCVForUnity
 
             public override string ToString()
             {
-                return "x1:" + x1.ToString() + " y1:" + y1.ToString() + "x2:" + x2.ToString() + " y2:" + y2.ToString() + " conf:" + conf.ToString() + "  cls:" + cls.ToString();
+                StringBuilder sb = new StringBuilder(128);
+                sb.AppendFormat("x1:{0} y1:{1} x2:{2} y2:{3} conf:{4} cls:{5}", x1, y1, x2, y2, conf, cls);
+                return sb.ToString();
             }
         };
 
-        public virtual DetectionData[] getData(Mat results)
+        public virtual DetectionData[] GetData(Mat results)
         {
             if (results.empty())
                 return new DetectionData[0];
@@ -711,7 +723,7 @@ namespace YOLOv8WithOpenCVForUnity
             return dst;
         }
 
-        public virtual string getClassLabel(float id)
+        public virtual string GetClassLabel(float id)
         {
             int classId = (int)id;
             string className = string.Empty;
