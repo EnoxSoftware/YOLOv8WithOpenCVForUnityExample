@@ -1,3 +1,5 @@
+#if !UNITY_WSA_10_0
+
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
@@ -15,7 +17,7 @@ namespace YOLOv8WithOpenCVForUnity
     /// <summary>
     /// Referring to https://github.com/ultralytics/ultralytics/
     /// </summary>
-    public class YOLOv8ClassPredictor : IDisposable
+    public class YOLOv8ClassPredictor
     {
         Size input_size;
         int backend;
@@ -314,3 +316,4 @@ namespace YOLOv8WithOpenCVForUnity
         }
     }
 }
+#endif

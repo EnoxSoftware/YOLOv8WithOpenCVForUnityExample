@@ -1,3 +1,5 @@
+#if !UNITY_WSA_10_0
+
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
@@ -16,7 +18,7 @@ namespace YOLOv8WithOpenCVForUnity
     /// <summary>
     /// Referring to https://github.com/ultralytics/ultralytics/
     /// </summary>
-    public class YOLOv8PoseEstimater : IDisposable
+    public class YOLOv8PoseEstimater
     {
         Size input_size;
         float conf_threshold;
@@ -633,3 +635,4 @@ namespace YOLOv8WithOpenCVForUnity
         }
     }
 }
+#endif

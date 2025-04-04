@@ -1,30 +1,40 @@
-# Export YOLOv8 models to ONNX format for OpenCV Dnn module:
-https://github.com/ultralytics/ultralytics
-https://docs.ultralytics.com/tasks/
-https://docs.ultralytics.com/models/yolov8/
+# YOLOv8
 
-https://github.com/ultralytics/ultralytics/tree/main/examples/YOLOv8-OpenCV-ONNX-Python
+- https://github.com/ultralytics/ultralytics
+- https://docs.ultralytics.com/tasks/
+- https://docs.ultralytics.com/models/yolov8/
+- https://github.com/ultralytics/ultralytics/tree/main/examples/YOLOv8-OpenCV-ONNX-Python
 
-Please read the contents of the LICENSE file located directly under each folder before using the model. The license of the source model itself is subject to the license of the provider repository.
+## How to export a YOLOv8 model to ONNX format for OpenCV Dnn module
 
+- YOLOv8_export_to_OpenCVDNN_ONNX.ipynb
 
-# How to Train YOLOv8 Object Detection on a Custom Dataset
-https://github.com/roboflow/notebooks/blob/main/notebooks/train-yolov8-object-detection-on-custom-dataset.ipynb
+> Please read the contents of the LICENSE file located directly under each folder before using the model. The license of the source model itself is subject to the license of the provider repository.
 
-# YOLOv8 Train Custom Dataset: Train Your Object Detection Model 
-https://yolov8.org/yolov8-train-custom-dataset-train/
+## How to Train YOLOv8 Object Detection on a Custom Dataset
 
-# Training custom datasets with Ultralytics YOLOv8 in Google Colab
-https://www.ultralytics.com/blog/training-custom-datasets-with-ultralytics-yolov8-in-google-colab
+- https://github.com/roboflow/notebooks/blob/main/notebooks/train-yolov8-object-detection-on-custom-dataset.ipynb
 
-# How to Train YOLOv8 Instance Segmentation on a Custom Dataset
-https://blog.roboflow.com/how-to-train-a-yolov8-classification-model/
+## YOLOv8 Train Custom Dataset: Train Your Object Detection Model
 
-# How to Train an Ultralytics YOLOv8 Classification Model
-https://blog.roboflow.com/how-to-train-a-yolov8-classification-model/
+- https://yolov8.org/yolov8-train-custom-dataset-train/
 
-# How to Train a Custom Ultralytics YOLOv8 Pose Estimation Model
-https://blog.roboflow.com/train-a-custom-yolov8-pose-estimation-model/
+## Training custom datasets with Ultralytics YOLOv8 in Google Colab
 
-# How to Train an Ultralytics YOLOv8 Oriented Bounding Box (OBB) Model
-https://blog.roboflow.com/train-yolov8-obb-model/
+- https://www.ultralytics.com/blog/training-custom-datasets-with-ultralytics-yolov8-in-google-colab
+
+## How to Train YOLOv8 Instance Segmentation on a Custom Dataset
+
+- https://blog.roboflow.com/how-to-train-a-yolov8-classification-model/
+
+## How to Train an Ultralytics YOLOv8 Classification Model
+
+- https://blog.roboflow.com/how-to-train-a-yolov8-classification-model/
+
+## How to Train a Custom Ultralytics YOLOv8 Pose Estimation Model
+
+- https://blog.roboflow.com/train-a-custom-yolov8-pose-estimation-model/
+
+## How to Train an Ultralytics YOLOv8 Oriented Bounding Box (OBB) Model
+
+- https://blog.roboflow.com/train-yolov8-obb-model/

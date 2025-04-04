@@ -1,3 +1,5 @@
+#if !UNITY_WSA_10_0
+
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
@@ -17,7 +19,7 @@ namespace YOLOv8WithOpenCVForUnity
     /// Referring to https://github.com/ultralytics/ultralytics/
     /// https://github.com/ultralytics/ultralytics/tree/main/examples/YOLOv8-OpenCV-ONNX-Python
     /// </summary>
-    public class YOLOv8ObjectDetector : IDisposable
+    public class YOLOv8ObjectDetector
     {
         Size input_size;
         float conf_threshold;
@@ -495,3 +497,4 @@ namespace YOLOv8WithOpenCVForUnity
         }
     }
 }
+#endif
