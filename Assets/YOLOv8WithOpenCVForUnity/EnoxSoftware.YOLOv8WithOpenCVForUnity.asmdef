@@ -1,0 +1,16 @@
+{
+    "name": "EnoxSoftware.YOLOv8WithOpenCVForUnity",
+    "rootNamespace": "",
+    "references": [
+        "GUID:cef0e9dabbfe59a4790acbf31c21f33e"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
