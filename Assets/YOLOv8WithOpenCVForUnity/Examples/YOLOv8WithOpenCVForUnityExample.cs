@@ -1,4 +1,5 @@
 using System.Collections;
+using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -26,7 +27,7 @@ namespace YOLOv8WithOpenCVForUnityExample
 
             exampleTitle.text = "YOLOv8WithOpenCVForUnity Example " + Application.version;
 
-            versionInfo.text = OpenCVForUnity.CoreModule.Core.NATIVE_LIBRARY_NAME + " " + OpenCVForUnity.UnityUtils.Utils.getVersion() + " (" + OpenCVForUnity.CoreModule.Core.VERSION + ")";
+            versionInfo.text = OpenCVForUnity.CoreModule.Core.NATIVE_LIBRARY_NAME + " " + OpenCVEnv.GetVersion() + " (" + OpenCVForUnity.CoreModule.Core.VERSION + ")";
             versionInfo.text += " / UnityEditor " + Application.unityVersion;
             versionInfo.text += " / ";
 #if UNITY_EDITOR

@@ -9,11 +9,11 @@ using System.Threading.Tasks;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.UnityUtils;
+using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker.DataStruct;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker.Utils;
+using OpenCVForUnity.UnityIntegration.Worker;
+using OpenCVForUnity.UnityIntegration.Worker.DataStruct;
+using OpenCVForUnity.UnityIntegration.Worker.Utils;
 using OpenCVRect = OpenCVForUnity.CoreModule.Rect;
 
 namespace YOLOv8WithOpenCVForUnity.Worker
@@ -322,7 +322,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             }
 
             var dst = new ClassificationData[num];
-            MatUtils.copyFromMat(_classificationResultBuffer, dst);
+            OpenCVMatUtils.CopyFromMat(_classificationResultBuffer, dst);
 
             return dst;
         }
@@ -377,10 +377,11 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
                 for (int j = i + 1; j < indices.Length; j++)
                 {
-                    if (data[indices[j]].Confidence > maxConfidence)
+                    float compareConfidence = data[indices[j]].Confidence;
+                    if (compareConfidence > maxConfidence)
                     {
                         maxIndex = j;
-                        maxConfidence = data[indices[j]].Confidence;
+                        maxConfidence = compareConfidence;
                     }
                 }
 
@@ -419,19 +420,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             float maxVal = float.MinValue;
             int maxLoc = 0;
 
-            Span<float> data;
-            using (Mat result_row = result.row(index))
-            {
 #if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
-                data = result_row.AsSpan<float>();
-#else
-                int requiredResultRowLen = (int)result_row.total();
-                if (_allResultRowBuffer == null || _allResultRowBuffer.Length < requiredResultRowLen)
-                    _allResultRowBuffer = new float[requiredResultRowLen];
-                result_row.get(0, 0, _allResultRowBuffer);
-                data = _allResultRowBuffer.AsSpan(0, requiredResultRowLen);
-#endif
-            }
+            Span<float> data = result.AsSpan<float>(index);
 
             for (int i = 0; i < data.Length; i++)
             {
@@ -441,6 +431,25 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     maxLoc = i;
                 }
             }
+#else
+            using (Mat result_row = result.row(index))
+            {
+                int requiredResultRowLen = (int)result_row.total() * result_row.channels();
+                if (_allResultRowBuffer == null || _allResultRowBuffer.Length < requiredResultRowLen)
+                    _allResultRowBuffer = new float[requiredResultRowLen];
+                result_row.get(0, 0, _allResultRowBuffer);
+                float[] data = _allResultRowBuffer;
+
+                for (int i = 0; i < requiredResultRowLen; i++)
+                {
+                    if (data[i] > maxVal)
+                    {
+                        maxVal = data[i];
+                        maxLoc = i;
+                    }
+                }
+            }
+#endif
 
             return new ClassificationData(maxVal, maxLoc);
         }

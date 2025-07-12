@@ -9,11 +9,11 @@ using System.Threading.Tasks;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.DnnModule;
 using OpenCVForUnity.ImgprocModule;
-using OpenCVForUnity.UnityUtils;
+using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker.DataStruct;
-using YOLOv8WithOpenCVForUnity.UnityIntegration.Worker.Utils;
+using OpenCVForUnity.UnityIntegration.Worker;
+using OpenCVForUnity.UnityIntegration.Worker.DataStruct;
+using OpenCVForUnity.UnityIntegration.Worker.Utils;
 
 namespace YOLOv8WithOpenCVForUnity.Worker
 {
@@ -212,13 +212,14 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 throw new ArgumentException("Invalid result matrix. It must have at least 56 columns.");
 
 #if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
-            Span<PoseEstimationCOCO17DataUnsafe> data = ToStructuredDataAsSpanUnsafe(result);
+            ReadOnlySpan<PoseEstimationCOCO17DataUnsafe> data = ToStructuredDataAsSpanUnsafe(result);
 #else
             PoseEstimationCOCO17Data[] data = ToStructuredData(result);
 #endif
 
-            foreach (var d in data)
+            for (int i = 0; i < data.Length; i++)
             {
+                ref readonly var d = ref data[i];
                 float left = d.X1;
                 float top = d.Y1;
                 float right = d.X2;
@@ -243,19 +244,23 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
                 // draw points
                 int radius = 5;
-                var landmarks = d.GetLandmarks();
-                for (int i = 0; i < landmarks.Length; i++)
+#if NET_STANDARD_2_1
+                ReadOnlySpan<Vec3f> landmarks = d.GetLandmarks();
+#else
+                Vec3f[] landmarks = d.GetLandmarksArray();
+#endif
+                for (int j = 0; j < landmarks.Length; j++)
                 {
-                    var point_c = POSE_PALETTE[KPT_COLOR_INDEX[i]].ToValueTuple();
+                    var point_c = POSE_PALETTE[KPT_COLOR_INDEX[j]].ToValueTuple();
                     var color_k = isRGB ? point_c : (point_c.v2, point_c.v1, point_c.v0, point_c.v3);
 
-                    Vec3f landmark = landmarks[i];
+                    ref readonly var landmark = ref landmarks[j];
                     float x_coord = landmark.Item1;
                     float y_coord = landmark.Item2;
 
                     if (x_coord % image.width() != 0 && y_coord % image.height() != 0)
                     {
-                        float point_conf = landmarks[i].Item3;
+                        float point_conf = landmark.Item3;
                         if (point_conf < 0.5)
                             continue;
 
@@ -264,13 +269,13 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 }
 
                 // draw lines
-                for (int i = 0; i < SKELETON.GetLength(0); i++)
+                for (int j = 0; j < SKELETON.GetLength(0); j++)
                 {
-                    Vec3f landmark1 = landmarks[SKELETON[i, 0] - 1];
+                    ref readonly var landmark1 = ref landmarks[SKELETON[j, 0] - 1];
                     float pos1_x = landmark1.Item1;
                     float pos1_y = landmark1.Item2;
                     float conf1 = landmark1.Item3;
-                    Vec3f landmark2 = landmarks[SKELETON[i, 1] - 1];
+                    ref readonly var landmark2 = ref landmarks[SKELETON[j, 1] - 1];
                     float pos2_x = landmark2.Item1;
                     float pos2_y = landmark2.Item2;
                     float conf2 = landmark2.Item3;
@@ -284,7 +289,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     if (pos2_x % image.width() == 0 || pos2_y % image.height() == 0 || pos2_x < 0 || pos2_y < 0)
                         continue;
 
-                    var line_c = POSE_PALETTE[LIMB_COLOR_INDEX[i]].ToValueTuple();
+                    var line_c = POSE_PALETTE[LIMB_COLOR_INDEX[j]].ToValueTuple();
                     var color_k = isRGB ? line_c : (line_c.v2, line_c.v1, line_c.v0, line_c.v3);
 
                     Imgproc.line(image, (pos1_x, pos1_y), (pos2_x, pos2_y), color_k, 2, Imgproc.LINE_AA);
@@ -297,22 +302,30 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
                 for (int i = 0; i < data.Length; ++i)
                 {
-                    var d = data[i];
+                    ref readonly var d = ref data[i];
                     sb.AppendFormat("-----------object {0}-----------", i + 1);
                     sb.AppendLine();
                     sb.Append("Class: ").Append(GetClassLabel(d.ClassId));
                     sb.AppendLine();
                     sb.AppendFormat("Confidence: {0:F4}", d.Confidence);
                     sb.AppendLine();
-                    sb.AppendFormat("Box: {0:F0} {1:F0} {2:F0} {3:F0}", d.X1, d.Y1, d.X2, d.Y2);
+                    sb.AppendFormat("Box: ({0:F3}, {1:F3}, {2:F3}, {3:F3})", d.X1, d.Y1, d.X2, d.Y2);
                     sb.AppendLine();
+#if NET_STANDARD_2_1
                     ReadOnlySpan<Vec3f> landmarks = d.GetLandmarks();
-                    sb.Append("Landmarks:");
-                    foreach (var p in landmarks)
+#else
+                    Vec3f[] landmarks = d.GetLandmarksArray();
+#endif
+                    sb.Append("Landmarks: ");
+                    sb.Append("{");
+                    for (int j = 0; j < landmarks.Length; j++)
                     {
-                        sb.Append(" ");
-                        sb.Append(p.ToString());
+                        ref readonly var p = ref landmarks[j];
+                        sb.AppendFormat("({0:F3}, {1:F3}, {2:F3})", p.Item1, p.Item2, p.Item3);
+                        if (j < landmarks.Length - 1)
+                            sb.Append(", ");
                     }
+                    sb.Append("}");
                     sb.AppendLine();
                 }
 
@@ -416,7 +429,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 throw new ArgumentException("Invalid result matrix. It must have at least 56 columns.");
 
             var dst = new PoseEstimationCOCO17DataUnsafe[result.rows()];
-            MatUtils.copyFromMat(result, dst);
+            OpenCVMatUtils.CopyFromMat(result, dst);
 
             return dst;
         }
@@ -637,8 +650,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
             boxClsconfsKpts.get(0, 0, _allBoxClsconfsKptsBuffer);
             preNMS_Nx56.get(0, 0, _allPreNMSBuffer);
-            ReadOnlySpan<float> allBoxClsconfsKpts = _allBoxClsconfsKptsBuffer.AsSpan(0, requiredBoxClsconfsKptsLen);
-            Span<float> allPreNMS = _allPreNMSBuffer.AsSpan(0, requiredPreNMSLen);
+            float[] allBoxClsconfsKpts = _allBoxClsconfsKptsBuffer;
+            float[] allPreNMS = _allPreNMSBuffer;
 #endif
 
             int ind = 0;
@@ -677,7 +690,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                         float[] newBuffer = new float[requiredPreNMSLen];
                         Array.Copy(_allPreNMSBuffer, newBuffer, _allPreNMSBuffer.Length);
                         _allPreNMSBuffer = newBuffer;
-                        allPreNMS = _allPreNMSBuffer.AsSpan(0, requiredPreNMSLen);
+                        allPreNMS = _allPreNMSBuffer;
 #endif
                     }
 
@@ -827,9 +840,9 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
             preNMS_Nx56.get(0, 0, _allPreNMSBuffer);
             indices.get(0, 0, _allIndicesBuffer);
-            ReadOnlySpan<float> allPreNMS = _allPreNMSBuffer.AsSpan(0, requiredPreNMSLen);
-            ReadOnlySpan<int> allIndices = _allIndicesBuffer.AsSpan(0, requiredIndicesLen);
-            Span<float> allResult = _allResultBuffer.AsSpan(0, requiredResultLen);
+            float[] allPreNMS = _allPreNMSBuffer;
+            int[] allIndices = _allIndicesBuffer;
+            float[] allResult = _allResultBuffer;
 #endif
 
             for (int i = 0; i < num; ++i)
@@ -839,7 +852,11 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 int preNMSOffset = idx * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
 
                 // Copy detection and kpts data
+#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
                 allPreNMS.Slice(preNMSOffset, DETECTION_RESULT_COLUMNS + KPTS_COLUMNS).CopyTo(allResult.Slice(resultOffset, DETECTION_RESULT_COLUMNS + KPTS_COLUMNS));
+#else
+                Buffer.BlockCopy(allPreNMS, preNMSOffset * 4, allResult, resultOffset * 4, (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS) * 4);
+#endif
             }
 
 #if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
@@ -858,11 +875,14 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (num == 0)
                 return;
 
-            float ratio = Mathf.Max((float)originalSize.width / (float)inputSize.width, (float)originalSize.height / (float)inputSize.height);
-            float xFactor = ratio;
-            float yFactor = ratio;
-            float xShift = ((float)inputSize.width * ratio - (float)originalSize.width) / 2f;
-            float yShift = ((float)inputSize.height * ratio - (float)originalSize.height) / 2f;
+            float input_w = (float)inputSize.width;
+            float input_h = (float)inputSize.height;
+            float original_w = (float)originalSize.width;
+            float original_h = (float)originalSize.height;
+
+            float gain = Mathf.Min(input_w / original_w, input_h / original_h);
+            float pad_w = (input_w - original_w * gain) / 2;
+            float pad_h = (input_h - original_h * gain) / 2;
 
 #if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             Span<float> allResult = result.AsSpan<float>();
@@ -872,16 +892,21 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 _allResultBuffer = new float[requiredResultLen];
 
             result.get(0, 0, _allResultBuffer);
-            Span<float> allResult = _allResultBuffer.AsSpan(0, requiredResultLen);
+            float[] allResult = _allResultBuffer;
 #endif
 
             for (int i = 0; i < num; ++i)
             {
                 int resultOffset = i * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-                float x1 = Mathf.Round(allResult[resultOffset] * xFactor - xShift);
-                float y1 = Mathf.Round(allResult[resultOffset + 1] * yFactor - yShift);
-                float x2 = Mathf.Round(allResult[resultOffset + 2] * xFactor - xShift);
-                float y2 = Mathf.Round(allResult[resultOffset + 3] * yFactor - yShift);
+                float x1 = (allResult[resultOffset] - pad_w) / gain;
+                float y1 = (allResult[resultOffset + 1] - pad_h) / gain;
+                float x2 = (allResult[resultOffset + 2] - pad_w) / gain;
+                float y2 = (allResult[resultOffset + 3] - pad_h) / gain;
+
+                x1 = Mathf.Clamp(x1, 0, original_w);
+                y1 = Mathf.Clamp(y1, 0, original_h);
+                x2 = Mathf.Clamp(x2, 0, original_w);
+                y2 = Mathf.Clamp(y2, 0, original_h);
 
                 allResult[resultOffset] = x1;
                 allResult[resultOffset + 1] = y1;
@@ -891,8 +916,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 int kptOffset = resultOffset + DETECTION_RESULT_COLUMNS;
                 for (int j = 0; j < KPTS_COLUMNS; j += 3)
                 {
-                    allResult[kptOffset + j] = Mathf.Round(allResult[kptOffset + j] * xFactor - xShift);
-                    allResult[kptOffset + j + 1] = Mathf.Round(allResult[kptOffset + j + 1] * yFactor - yShift);
+                    allResult[kptOffset + j] = (allResult[kptOffset + j] - pad_w) / gain;
+                    allResult[kptOffset + j + 1] = (allResult[kptOffset + j + 1] - pad_h) / gain;
                 }
             }
 
