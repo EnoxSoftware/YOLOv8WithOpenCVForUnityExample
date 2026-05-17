@@ -1,17 +1,26 @@
-#if !UNITY_WSA_10_0
+#if !UNITY_WSA_10_0 && NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
 
 using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
 using OpenCVForUnity.UnityIntegration;
 using OpenCVForUnity.UnityIntegration.Helper.Source2Mat;
+using OpenCVForUnity.UnityIntegration.Runner;
+using OpenCVForUnity.UnityIntegration.Worker;
+using OpenCVForUnity.UnityIntegration.Worker.DnnModule;
+using OpenCVForUnity.UnityIntegration.Worker.Utils;
+#if OPENCV_SENTIS_AVAILABLE
+using Unity.InferenceEngine;
+#endif
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using YOLOv8WithOpenCVForUnity.Worker;
+using static OpenCVForUnity.UnityIntegration.Helper.Source2Mat.MultiSource2MatHelper;
 
 namespace YOLOv8WithOpenCVForUnityExample
 {
@@ -27,39 +36,59 @@ namespace YOLOv8WithOpenCVForUnityExample
     [RequireComponent(typeof(MultiSource2MatHelper))]
     public class YOLOv8PoseEstimationExample : MonoBehaviour
     {
+        // Public Fields
         [Header("Output")]
         [Tooltip("The RawImage for previewing the result.")]
-        public RawImage _resultPreview;
+        public RawImage ResultPreview;
 
         [Header("UI")]
-        public Toggle _useAsyncInferenceToggle;
-        public bool _useAsyncInference = false;
+        [Tooltip("ON: Sentis. OFF: OpenCV DNN. Assign OnUseSentisInferenceToggleValueChanged to this toggle's On Value Changed in the Inspector.")]
+        public Toggle UseSentisInferenceToggle;
+        [Tooltip("Sentis backend selector. Dropdown option order must match Enum.GetValues(typeof(BackendType)) (numeric order). Assign OnSentisBackendDropdownValueChanged to On Value Changed (int). Value changes reinitialize inference.")]
+        public Dropdown SentisBackendDropdown;
+#if OPENCV_SENTIS_AVAILABLE
+        [Tooltip("When enabled, runs YOLOv8 inference with Sentis (MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS). Inspector paths may stay .onnx; at runtime they are rewritten to .sentis and loaded from StreamingAssets (place a matching .sentis beside the onnx file).")]
+        public bool UseSentisInference = true;
+        [Tooltip("When using Sentis: backend / target selects Sentis BackendType (CPU / GPU, etc.).")]
+        public BackendType YoloSentisBackendType = BackendType.GPUCompute;
+#endif
+        public Toggle UseAsyncInferenceToggle;
+        public bool UseAsyncInference = true;
 
         [Header("Model Settings")]
         [Tooltip("Path to a binary file of model contains trained weights.")]
-        public string _model = "YOLOv8WithOpenCVForUnityExample/yolov8n-pose.onnx";
+        public string Model = "YOLOv8WithOpenCVForUnityExample/yolov8n-pose.onnx";
 
         [Tooltip("Optional path to a text file with names of classes to label detected objects.")]
-        public string _classes = "";
+        public string Classes = "";
 
         [Tooltip("Confidence threshold.")]
-        public float _confThreshold = 0.25f;
+        public float ConfThreshold = 0.25f;
 
         [Tooltip("Non-maximum suppression threshold.")]
-        public float _nmsThreshold = 0.45f;
+        public float NmsThreshold = 0.45f;
 
         [Tooltip("Maximum detections per image.")]
-        public int _topK = 300;
+        public int TopK = 300;
 
         [Tooltip("Preprocess input image by resizing to a specific width.")]
-        public int _inpWidth = 640;
+        public int InpWidth = 640;
 
         [Tooltip("Preprocess input image by resizing to a specific height.")]
-        public int _inpHeight = 640;
+        public int InpHeight = 640;
 
+        // Private Fields
         private YOLOv8PoseEstimater _poseEstimator;
-        private string _classes_filepath;
-        private string _model_filepath;
+        private string _classesFilepath;
+        private string _modelFilepathOnnx;
+#if OPENCV_SENTIS_AVAILABLE
+        private string _modelFilepathSentis;
+        /// <summary>
+        /// <see cref="BackendType"/> values in <see cref="Enum.GetValues(System.Type)"/> order (sorted by underlying numeric value). Dropdown options must use the same order.
+        /// </summary>
+        private static readonly BackendType[] SentisBackendTypesInEnumOrder =
+            (BackendType[])Enum.GetValues(typeof(BackendType));
+#endif
 
         private Texture2D _texture;
         private MultiSource2MatHelper _multiSource2MatHelper;
@@ -67,42 +96,46 @@ namespace YOLOv8WithOpenCVForUnityExample
 
         private FpsMonitor _fpsMonitor;
         private CancellationTokenSource _cts = new CancellationTokenSource();
+        private MatSingleFlightSyncAsyncRunner _inferenceRunner;
+        private bool _inferenceReinitializing;
 
-        private Mat _bgrMatForAsync;
-        private Mat _latestDetectedObjects;
-        private Task _inferenceTask;
-        private readonly Queue<Action> _mainThreadQueue = new();
-        private readonly object _queueLock = new();
-
-        // Use this for initialization
-        async void Start()
+        private async void Start()
         {
             _fpsMonitor = GetComponent<FpsMonitor>();
 
             _multiSource2MatHelper = gameObject.GetComponent<MultiSource2MatHelper>();
+
+#if UNITY_6000_0_OR_NEWER
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.WebGPU && _multiSource2MatHelper.RequestedSource2MatHelperClassName == MultiSource2MatHelperClassName.WebCamTexture2MatHelper)
+            {
+                _multiSource2MatHelper.RequestedSource2MatHelperClassName = MultiSource2MatHelperClassName.WebCamTexture2MatAsyncGPUHelper;
+            }
+#endif
             _multiSource2MatHelper.OutputColorFormat = Source2MatHelperColorFormat.RGBA;
 
-            // Update GUI state
-#if !UNITY_WEBGL || UNITY_EDITOR
-            _useAsyncInferenceToggle.isOn = _useAsyncInference;
-#else
-            _useAsyncInferenceToggle.isOn = false;
-            _useAsyncInferenceToggle.interactable = false;
-#endif
+            UpdateUseSentisInference();
+            UpdateUseAsyncInference();
+            UpdateInferenceModeToggles(inferenceReinitializing: false);
 
-            // Asynchronously retrieves the readable file path from the StreamingAssets directory.
             if (_fpsMonitor != null)
                 _fpsMonitor.ConsoleText = "Preparing file access...";
 
-            if (!string.IsNullOrEmpty(_classes))
+            if (!string.IsNullOrEmpty(Classes))
             {
-                _classes_filepath = await OpenCVEnv.GetFilePathTaskAsync(_classes, cancellationToken: _cts.Token);
-                if (string.IsNullOrEmpty(_classes_filepath)) Debug.Log("The file:" + _classes + " did not exist.");
+                _classesFilepath = await OpenCVEnv.GetFilePathTaskAsync(Classes, cancellationToken: _cts.Token);
+                if (string.IsNullOrEmpty(_classesFilepath)) Debug.Log("The file:" + Classes + " did not exist.");
             }
-            if (!string.IsNullOrEmpty(_model))
+            if (!string.IsNullOrEmpty(Model))
             {
-                _model_filepath = await OpenCVEnv.GetFilePathTaskAsync(_model, cancellationToken: _cts.Token);
-                if (string.IsNullOrEmpty(_model_filepath)) Debug.Log("The file:" + _model + " did not exist.");
+                _modelFilepathOnnx = await OpenCVEnv.GetFilePathTaskAsync(Model, cancellationToken: _cts.Token);
+                if (string.IsNullOrEmpty(_modelFilepathOnnx)) Debug.Log("The file:" + Model + " did not exist.");
+#if OPENCV_SENTIS_AVAILABLE
+                string sentisModelFileName = StreamingAssetPathOnnxToSentisIfNeeded(Model);
+                _modelFilepathSentis = await OpenCVEnv.GetFilePathTaskAsync(
+                    sentisModelFileName,
+                    cancellationToken: _cts.Token);
+                if (string.IsNullOrEmpty(_modelFilepathSentis)) Debug.Log("The file:" + sentisModelFileName + " did not exist.");
+#endif
             }
 
             if (_fpsMonitor != null)
@@ -111,28 +144,15 @@ namespace YOLOv8WithOpenCVForUnityExample
             Run();
         }
 
-        // Use this for initialization
         protected virtual void Run()
         {
-            //if true, The error log of the Native side OpenCV will be displayed on the Unity Editor Console.
             OpenCVDebug.SetDebugMode(true);
 
-
-            if (string.IsNullOrEmpty(_model_filepath))
-            {
-                Debug.LogError("model: " + _model + " or " + "classes: " + _classes + " is not loaded.");
-            }
-            else
-            {
-                _poseEstimator = new YOLOv8PoseEstimater(_model_filepath, _classes_filepath, new Size(_inpWidth, _inpHeight), _confThreshold, _nmsThreshold, _topK);
-            }
+            InitializeInference();
 
             _multiSource2MatHelper.Initialize();
         }
 
-        /// <summary>
-        /// Raises the source to mat helper initialized event.
-        /// </summary>
         public virtual void OnSourceToMatHelperInitialized()
         {
             Debug.Log("OnSourceToMatHelperInitialized");
@@ -142,43 +162,39 @@ namespace YOLOv8WithOpenCVForUnityExample
             _texture = new Texture2D(rgbaMat.cols(), rgbaMat.rows(), TextureFormat.RGBA32, false);
             OpenCVMatUtils.MatToTexture2D(rgbaMat, _texture);
 
-            _resultPreview.texture = _texture;
-            _resultPreview.GetComponent<AspectRatioFitter>().aspectRatio = (float)_texture.width / _texture.height;
-
+            ResultPreview.texture = _texture;
+            ResultPreview.GetComponent<AspectRatioFitter>().aspectRatio = (float)_texture.width / _texture.height;
 
             if (_fpsMonitor != null)
             {
                 _fpsMonitor.Add("width", rgbaMat.width().ToString());
                 _fpsMonitor.Add("height", rgbaMat.height().ToString());
                 _fpsMonitor.Add("orientation", Screen.orientation.ToString());
+                UpdateFpsMonitorInferenceInfo(_fpsMonitor, _poseEstimator, UseAsyncInference);
             }
 
             _bgrMat = new Mat(rgbaMat.rows(), rgbaMat.cols(), CvType.CV_8UC3);
-            _bgrMatForAsync = new Mat();
         }
 
-        /// <summary>
-        /// Raises the source to mat helper disposed event.
-        /// </summary>
         public virtual void OnSourceToMatHelperDisposed()
         {
             Debug.Log("OnSourceToMatHelperDisposed");
 
-            if (_inferenceTask != null && !_inferenceTask.IsCompleted) _inferenceTask.Wait(500);
+            try
+            {
+                _poseEstimator?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            _inferenceRunner?.Cancel();
 
             _bgrMat?.Dispose(); _bgrMat = null;
-
-            _bgrMatForAsync?.Dispose(); _bgrMatForAsync = null;
-            _latestDetectedObjects?.Dispose(); _latestDetectedObjects = null;
 
             if (_texture != null) Texture2D.Destroy(_texture); _texture = null;
         }
 
-        /// <summary>
-        /// Raises the source to mat helper error occurred event.
-        /// </summary>
-        /// <param name="errorCode">Error code.</param>
-        /// <param name="message">Message.</param>
         public void OnSourceToMatHelperErrorOccurred(Source2MatHelperErrorCode errorCode, string message)
         {
             Debug.Log("OnSourceToMatHelperErrorOccurred " + errorCode + ":" + message);
@@ -189,78 +205,33 @@ namespace YOLOv8WithOpenCVForUnityExample
             }
         }
 
-        // Update is called once per frame
-        void Update()
+        private void Update()
         {
-            ProcessMainThreadQueue();
+            if (_inferenceReinitializing)
+                return;
 
             if (_multiSource2MatHelper.IsPlaying() && _multiSource2MatHelper.DidUpdateThisFrame())
             {
-
                 Mat rgbaMat = _multiSource2MatHelper.GetMat();
 
-                if (_poseEstimator == null)
-                {
-                    Imgproc.putText(rgbaMat, "model file is not loaded.", new Point(5, rgbaMat.rows() - 30), Imgproc.FONT_HERSHEY_SIMPLEX, 0.7, new Scalar(255, 255, 255, 255), 2, Imgproc.LINE_AA, false);
-                    Imgproc.putText(rgbaMat, "Please read console message.", new Point(5, rgbaMat.rows() - 10), Imgproc.FONT_HERSHEY_SIMPLEX, 0.7, new Scalar(255, 255, 255, 255), 2, Imgproc.LINE_AA, false);
-                }
-                else
+                if (_poseEstimator != null)
                 {
                     Imgproc.cvtColor(rgbaMat, _bgrMat, Imgproc.COLOR_RGBA2BGR);
 
-                    if (_useAsyncInference)
+                    if (_inferenceRunner != null)
                     {
-                        // asynchronous execution
-
-                        if (_inferenceTask == null || _inferenceTask.IsCompleted)
-                        {
-                            _bgrMat.copyTo(_bgrMatForAsync); // for asynchronous execution, deep copy
-                            _inferenceTask = Task.Run(async () =>
+                        _inferenceRunner.SubmitWork(
+                            _bgrMat,
+                            syncWork: m => _poseEstimator.Estimate(m, useCopyOutput: true),
+                            asyncWork: async m =>
                             {
-                                try
-                                {
-                                    // Pose estimator inference
-                                    var newObjects = await _poseEstimator.EstimateAsync(_bgrMatForAsync);
-                                    RunOnMainThread(() =>
-                                        {
-                                            _latestDetectedObjects?.Dispose();
-                                            _latestDetectedObjects = newObjects;
-                                        });
-                                }
-                                catch (OperationCanceledException ex)
-                                {
-                                    Debug.Log($"Inference canceled: {ex}");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Debug.LogError($"Inference error: {ex}");
-                                }
+                                CancellationToken ct = _inferenceRunner.InFlightAsyncWorkCancellationToken;
+                                return await _poseEstimator.EstimateTaskAsync(m, ct);
                             });
-                        }
 
-                        Imgproc.cvtColor(_bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
-
-                        if (_latestDetectedObjects != null)
+                        if (_inferenceRunner.TryGetLatestResult(out Mat detectedObjects))
                         {
-                            _poseEstimator.Visualize(rgbaMat, _latestDetectedObjects, false, true);
-                        }
-                    }
-                    else
-                    {
-                        // synchronous execution
-
-                        // TickMeter tm = new TickMeter();
-                        // tm.start();
-
-                        // Pose estimator inference
-                        using (Mat objects = _poseEstimator.Estimate(_bgrMat))
-                        {
-                            // tm.stop();
-                            // Debug.Log("YOLOv8PoseEstimater Inference time, ms: " + tm.getTimeMilli());
-
-                            Imgproc.cvtColor(_bgrMat, rgbaMat, Imgproc.COLOR_BGR2RGBA);
-
-                            _poseEstimator.Visualize(rgbaMat, objects, false, true);
+                            _poseEstimator.Visualize(rgbaMat, detectedObjects, false, true);
                         }
                     }
                 }
@@ -269,101 +240,310 @@ namespace YOLOv8WithOpenCVForUnityExample
             }
         }
 
-        /// <summary>
-        /// Raises the destroy event.
-        /// </summary>
-        protected virtual void OnDestroy()
+        private async void OnDestroy()
         {
             _multiSource2MatHelper?.Dispose();
 
-            _poseEstimator?.Dispose();
+            await DisposeInferenceAsync();
 
             OpenCVDebug.SetDebugMode(false);
 
             _cts?.Dispose();
         }
 
-        /// <summary>
-        /// Raises the back button click event.
-        /// </summary>
         public virtual void OnBackButtonClick()
         {
             SceneManager.LoadScene("YOLOv8WithOpenCVForUnityExample");
         }
 
-        /// <summary>
-        /// Raises the play button click event.
-        /// </summary>
         public virtual void OnPlayButtonClick()
         {
             _multiSource2MatHelper.Play();
         }
 
-        /// <summary>
-        /// Raises the pause button click event.
-        /// </summary>
         public virtual void OnPauseButtonClick()
         {
             _multiSource2MatHelper.Pause();
         }
 
-        /// <summary>
-        /// Raises the stop button click event.
-        /// </summary>
         public virtual void OnStopButtonClick()
         {
             _multiSource2MatHelper.Stop();
         }
 
-        /// <summary>
-        /// Raises the change camera button click event.
-        /// </summary>
         public virtual void OnChangeCameraButtonClick()
         {
             _multiSource2MatHelper.RequestedIsFrontFacing = !_multiSource2MatHelper.RequestedIsFrontFacing;
         }
 
         /// <summary>
-        /// Raises the use async inference toggle value changed event.
+        /// Invoke from <c>UseSentisInferenceToggle</c> On Value Changed. Switches the inference backend.
+        /// No-op when <c>OPENCV_SENTIS_AVAILABLE</c> is not defined.
         /// </summary>
+        public async void OnUseSentisInferenceToggleValueChanged()
+        {
+#if !OPENCV_SENTIS_AVAILABLE
+            await Task.CompletedTask;
+            return;
+#else
+            if (UseSentisInferenceToggle == null || _inferenceReinitializing)
+                return;
+
+            bool newSentis = UseSentisInferenceToggle.isOn;
+            if (newSentis == UseSentisInference)
+                return;
+
+            _inferenceReinitializing = true;
+            UpdateInferenceModeToggles(inferenceReinitializing: true);
+
+            await DisposeInferenceAsync();
+
+            UseSentisInference = newSentis;
+            UpdateUseAsyncInference();
+
+            InitializeInference();
+
+            UpdateFpsMonitorInferenceInfo(_fpsMonitor, _poseEstimator, UseAsyncInference);
+
+            _inferenceReinitializing = false;
+            UpdateInferenceModeToggles(inferenceReinitializing: false);
+#endif
+        }
+
+        /// <summary>
+        /// Invoke from <c>SentisBackendDropdown</c> On Value Changed. Switches Sentis backend type and reinitializes inference.
+        /// No-op when <c>OPENCV_SENTIS_AVAILABLE</c> is not defined.
+        /// </summary>
+        public async void OnSentisBackendDropdownValueChanged(int index)
+        {
+#if !OPENCV_SENTIS_AVAILABLE
+            await Task.CompletedTask;
+            return;
+#else
+            if (SentisBackendDropdown == null || _inferenceReinitializing)
+                return;
+
+            int n = SentisBackendTypesInEnumOrder.Length;
+            if (n == 0)
+                return;
+            int maxIdx = Mathf.Min(SentisBackendDropdown.options.Count, n) - 1;
+            if (maxIdx < 0)
+                return;
+            BackendType newBackend = SentisBackendTypesInEnumOrder[Mathf.Clamp(index, 0, maxIdx)];
+            if (newBackend == YoloSentisBackendType)
+                return;
+
+            _inferenceReinitializing = true;
+            UpdateInferenceModeToggles(inferenceReinitializing: true);
+
+            await DisposeInferenceAsync();
+
+            YoloSentisBackendType = newBackend;
+            UpdateUseSentisInference();
+            UpdateUseAsyncInference();
+
+            InitializeInference();
+
+            UpdateFpsMonitorInferenceInfo(_fpsMonitor, _poseEstimator, UseAsyncInference);
+
+            _inferenceReinitializing = false;
+            UpdateInferenceModeToggles(inferenceReinitializing: false);
+#endif
+        }
+
         public void OnUseAsyncInferenceToggleValueChanged()
         {
-            if (_useAsyncInferenceToggle.isOn != _useAsyncInference)
+            if (_inferenceReinitializing)
+                return;
+            if (UseAsyncInferenceToggle == null)
+                return;
+            if (UseAsyncInferenceToggle.isOn != UseAsyncInference)
             {
-                // Wait for inference to complete before changing the toggle
-                if (_inferenceTask != null && !_inferenceTask.IsCompleted) _inferenceTask.Wait(500);
-
-                _useAsyncInference = _useAsyncInferenceToggle.isOn;
+                if (_inferenceRunner != null)
+                    _inferenceRunner.UseAsyncWork = UseAsyncInferenceToggle.isOn;
+                UseAsyncInference = UseAsyncInferenceToggle.isOn;
+                UpdateFpsMonitorInferenceInfo(_fpsMonitor, _poseEstimator, UseAsyncInference);
             }
         }
 
-        private void RunOnMainThread(Action action)
+        private void UpdateInferenceModeToggles(bool inferenceReinitializing)
         {
-            if (action == null) return;
-
-            lock (_queueLock)
+            if (inferenceReinitializing)
             {
-                _mainThreadQueue.Enqueue(action);
+                if (UseSentisInferenceToggle != null)
+                    UseSentisInferenceToggle.interactable = false;
+                if (SentisBackendDropdown != null)
+                    SentisBackendDropdown.interactable = false;
+                if (UseAsyncInferenceToggle != null)
+                    UseAsyncInferenceToggle.interactable = false;
+                return;
             }
+
+            if (UseAsyncInferenceToggle != null)
+            {
+                UseAsyncInferenceToggle.SetIsOnWithoutNotify(UseAsyncInference);
+#if !UNITY_WEBGL || UNITY_EDITOR
+                UseAsyncInferenceToggle.interactable = true;
+#else
+                UseAsyncInferenceToggle.interactable = false;
+                UseAsyncInferenceToggle.SetIsOnWithoutNotify(false);
+                UseAsyncInference = false;
+                if (_inferenceRunner != null)
+                    _inferenceRunner.UseAsyncWork = false;
+#endif
+            }
+#if OPENCV_SENTIS_AVAILABLE
+            if (UseSentisInferenceToggle != null)
+            {
+                UseSentisInferenceToggle.SetIsOnWithoutNotify(UseSentisInference);
+                UseSentisInferenceToggle.interactable = true;
+            }
+            if (SentisBackendDropdown != null)
+                SentisBackendDropdown.interactable = UseSentisInference;
+            UpdateSentisBackendDropdown();
+#else
+            if (UseSentisInferenceToggle != null)
+            {
+                UseSentisInferenceToggle.SetIsOnWithoutNotify(false);
+                UseSentisInferenceToggle.interactable = false;
+            }
+            if (SentisBackendDropdown != null)
+                SentisBackendDropdown.interactable = false;
+#endif
         }
 
-        private void ProcessMainThreadQueue()
+#if OPENCV_SENTIS_AVAILABLE
+        private void UpdateSentisBackendDropdown()
         {
-            while (true)
+            if (SentisBackendDropdown == null || SentisBackendDropdown.options.Count == 0)
+                return;
+            if (SentisBackendTypesInEnumOrder.Length == 0)
+                return;
+            int idx = Array.IndexOf(SentisBackendTypesInEnumOrder, YoloSentisBackendType);
+            if (idx < 0)
+                idx = 0;
+            int maxIdx = Mathf.Min(SentisBackendDropdown.options.Count, SentisBackendTypesInEnumOrder.Length) - 1;
+            SentisBackendDropdown.SetValueWithoutNotify(Mathf.Clamp(idx, 0, maxIdx));
+        }
+#endif
+
+        private void UpdateUseSentisInference()
+        {
+#if OPENCV_SENTIS_AVAILABLE
+            if (!SystemInfo.supportsComputeShaders && YoloSentisBackendType == BackendType.GPUCompute)
+                YoloSentisBackendType = BackendType.GPUPixel;
+#endif
+        }
+
+        private void UpdateUseAsyncInference()
+        {
+        }
+
+        private async Task DisposeInferenceAsync()
+        {
+            if (_inferenceRunner != null)
+                await _inferenceRunner.DisposeAsync();
+            _inferenceRunner = null;
+
+            _poseEstimator?.Dispose();
+            _poseEstimator = null;
+        }
+
+        private void InitializeInference()
+        {
+            string modelPath = _modelFilepathOnnx;
+#if OPENCV_SENTIS_AVAILABLE
+            if (UseSentisInference)
+                modelPath = _modelFilepathSentis;
+#endif
+            if (string.IsNullOrEmpty(modelPath))
             {
-                Action action = null;
-                lock (_queueLock)
+                Debug.LogError("model: " + Model + " or " + "classes: " + Classes + " is not loaded. Please use [Tools] > [OpenCV for Unity] > [Setup Tools] > [Example Assets Downloader] to download the asset files required for this example scene, and then move them to the \"Assets/StreamingAssets\" folder.");
+                if (_fpsMonitor != null)
                 {
-                    if (_mainThreadQueue.Count == 0)
-                        break;
+                    _fpsMonitor.Toast("model file is not loaded.\nPlease read console message.", 20000);
+                }
+                return;
+            }
 
-                    action = _mainThreadQueue.Dequeue();
+            try
+            {
+#if OPENCV_SENTIS_AVAILABLE
+                if (UseSentisInference)
+                {
+                    _poseEstimator = new YOLOv8PoseEstimater(
+                        modelPath,
+                        _classesFilepath,
+                        new Size(InpWidth, InpHeight),
+                        ConfThreshold,
+                        NmsThreshold,
+                        TopK,
+                        MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS,
+                        (int)YoloSentisBackendType);
+                    Debug.Log("YOLOv8PoseEstimater initialized (Sentis / DNN_BACKEND_UNITY_SENTIS, backend=" + YoloSentisBackendType + ").");
+                }
+                else
+#endif
+                {
+                    _poseEstimator = new YOLOv8PoseEstimater(
+                        modelPath,
+                        _classesFilepath,
+                        new Size(InpWidth, InpHeight),
+                        ConfThreshold,
+                        NmsThreshold,
+                        TopK);
+                    Debug.Log("YOLOv8PoseEstimater initialized (OpenCV DNN).");
                 }
 
-                try { action?.Invoke(); }
-                catch (Exception ex) { Debug.LogException(ex); }
+                _inferenceRunner = new MatSingleFlightSyncAsyncRunner(
+                    useAsyncWork: UseAsyncInference,
+                    asyncWorkCancellationToken: _cts.Token,
+                    disposeAsyncAfterWorkTask: async () =>
+                    {
+                        await _poseEstimator.WaitForCompletionTaskAsync();
+                    });
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("YOLOv8PoseEstimationExample InitializeInference failed: " + ex);
             }
         }
+
+        private static void UpdateFpsMonitorInferenceInfo(FpsMonitor fpsMonitor, DnnInferenceWorkerBase worker, bool useAsyncInference)
+        {
+            if (fpsMonitor == null)
+                return;
+
+            if (worker != null)
+            {
+                int be = worker.DnnBackend;
+                int tgt = worker.DnnTarget;
+                fpsMonitor.Add("dnnBackend", MultiBackendDnn.GetBackendDisplayString(be));
+                fpsMonitor.Add("dnnTarget", MultiBackendDnn.GetTargetDisplayString(tgt));
+            }
+            else
+            {
+                fpsMonitor.Add("dnnBackend", "-");
+                fpsMonitor.Add("dnnTarget", "-");
+            }
+
+            string useAsyncText = worker != null
+                ? useAsyncInference.ToString()
+                : "-";
+            fpsMonitor.Add("useAsyncInference", useAsyncText);
+        }
+
+#if OPENCV_SENTIS_AVAILABLE
+        private static string StreamingAssetPathOnnxToSentisIfNeeded(string streamingAssetsRelativePath)
+        {
+            if (string.IsNullOrEmpty(streamingAssetsRelativePath))
+                return streamingAssetsRelativePath;
+            if (!streamingAssetsRelativePath.EndsWith(".onnx", StringComparison.OrdinalIgnoreCase))
+                return streamingAssetsRelativePath;
+            return Path.ChangeExtension(streamingAssetsRelativePath, ".sentis");
+        }
+#endif
     }
 }
+
 #endif

@@ -1,4 +1,4 @@
-#if !UNITY_WSA_10_0
+#if !UNITY_WSA_10_0 && NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
 
 using System;
 using System.Collections.Generic;
@@ -13,6 +13,7 @@ using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
 using OpenCVForUnity.UnityIntegration.Worker;
 using OpenCVForUnity.UnityIntegration.Worker.DataStruct;
+using OpenCVForUnity.UnityIntegration.Worker.DnnModule;
 using OpenCVForUnity.UnityIntegration.Worker.Utils;
 using OpenCVRect = OpenCVForUnity.CoreModule.Rect;
 
@@ -28,7 +29,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
     /// yolov8n-cls.onnx
     /// yolo11n-cls.onnx
     /// </summary>
-    public class YOLOv8ImageClassifier : ProcessingWorkerBase
+    public class YOLOv8ImageClassifier : DnnInferenceWorkerBase
     {
         protected static readonly Scalar SCALAR_WHITE = new Scalar(255, 255, 255, 255);
         protected static readonly Scalar SCALAR_0 = new Scalar(0, 0, 0, 0);
@@ -57,30 +58,41 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         };
 
         protected Size _inputSize;
-        protected int _backend;
-        protected int _target;
         protected int _numClasses = 1000;
-        protected Net _classificationNet;
-        protected List<string> _cachedUnconnectedOutLayersNames;
+        protected MultiBackendNet _classificationNet;
+        /// <summary>Output layer names for inference. Cached to avoid calling <c>getUnconnectedOutLayersNames()</c> every frame.</summary>
+        protected readonly List<string> _cachedUnconnectedOutLayersNames;
+        /// <summary>Reusable list for <see cref="MultiBackendNet.forward"/> / <see cref="MultiBackendNet.forwardTaskAsync"/> outputs.</summary>
+        protected readonly List<Mat> _forwardOutputList = new List<Mat>();
         protected List<string> _classNames;
         protected MatPool _inputSizeMatPool;
         protected Mat _classificationResultBuffer;
         protected Mat _output0Buffer;
 
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-        protected float[] _allResultRowBuffer;
-#endif
-
         /// <summary>
         /// Initializes a new instance of the YOLOv8ImageClassifier class.
         /// </summary>
-        /// <param name="modelFilepath">Path to the ONNX model file.</param>
+        /// <param name="modelFilepath">Path to the ONNX model file. For OpenCV, typically an ONNX file; when <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, a serialized path that <c>Unity.InferenceEngine.ModelLoader.Load(string)</c> can load.</param>
         /// <param name="classesFilepath">Path to the text file containing class names.</param>
         /// <param name="inputSize">Input size for the network (default: 224x224).</param>
-        /// <param name="backend">Preferred DNN backend.</param>
-        /// <param name="target">Preferred DNN target device.</param>
+        /// <param name="backend">
+        /// Preferred DNN backend: an OpenCV <see cref="Dnn"/> <c>DNN_BACKEND_*</c> constant, or <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>.
+#if OPENCV_SENTIS_AVAILABLE
+        /// When <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, <paramref name="target"/> is interpreted as an integer <c>Unity.InferenceEngine.BackendType</c> value. Assumes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer.
+#else
+        /// <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/> is only usable when the project includes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer and the OPENCV_SENTIS_AVAILABLE define.
+#endif
+        /// </param>
+        /// <param name="target">
+#if OPENCV_SENTIS_AVAILABLE
+        /// Preferred DNN target (OpenCV <c>DNN_TARGET_*</c>), or if <paramref name="backend"/> is <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, an integer to cast to <c>Unity.InferenceEngine.BackendType</c>.
+#else
+        /// An OpenCV <see cref="Dnn"/> <c>DNN_TARGET_*</c> constant.
+#endif
+        /// </param>
         public YOLOv8ImageClassifier(string modelFilepath, string classesFilepath, Size inputSize,
                                              int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
+            : base(backend, target)
         {
             if (string.IsNullOrEmpty(modelFilepath))
                 throw new ArgumentException("Model filepath cannot be empty.", nameof(modelFilepath));
@@ -88,21 +100,28 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 throw new ArgumentNullException(nameof(inputSize), "Input size cannot be null.");
 
             _inputSize = new Size(inputSize.width > 0 ? inputSize.width : 224, inputSize.height > 0 ? inputSize.height : 224);
-            _backend = backend;
-            _target = target;
 
+#if !OPENCV_SENTIS_AVAILABLE
+            if (DnnBackend == MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS)
+            {
+                throw new NotSupportedException(
+                    "DNN_BACKEND_UNITY_SENTIS requires Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer in the project and the OPENCV_SENTIS_AVAILABLE define.");
+            }
+#endif
+            List<string> cachedUnconnectedOutLayersNames;
             try
             {
-                _classificationNet = Dnn.readNetFromONNX(modelFilepath);
+                _classificationNet = MultiBackendDnn.readNet(modelFilepath);
+                _classificationNet.setPreferableBackend(DnnBackend);
+                _classificationNet.setPreferableTarget(DnnTarget);
+                cachedUnconnectedOutLayersNames = _classificationNet.getUnconnectedOutLayersNames();
             }
             catch (Exception e)
             {
                 throw new ArgumentException(
                     "Failed to initialize DNN model. Invalid model file path or corrupted model file.", e);
             }
-            _classificationNet.setPreferableBackend(_backend);
-            _classificationNet.setPreferableTarget(_target);
-            _cachedUnconnectedOutLayersNames = _classificationNet.getUnconnectedOutLayersNames();
+            _cachedUnconnectedOutLayersNames = cachedUnconnectedOutLayersNames;
 
             _output0Buffer = new Mat();
 
@@ -194,7 +213,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - useCopyOutput = false (default): Returns a reference to internal buffer (faster but unsafe across executions)
         /// - useCopyOutput = true: Returns a new copy of the result (thread-safe but slightly slower)
         ///
-        /// For better performance in async scenarios, use ClassifyAsync instead.
+        /// For better performance in async scenarios, use ClassifyTaskAsync instead.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="useCopyOutput">Whether to return a copy of the output (true) or a reference (false).</param>
@@ -219,15 +238,30 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - Use ToStructuredData() or GetBestMatchData() to convert to a more convenient format.
         ///
         /// Only one classification operation can run at a time.
+        ///
+        /// For the OpenCV Dnn module, inference is scheduled on a background thread when thread-pool scheduling is available.
+        /// Web builds cannot use thread pools; only then does the OpenCV Dnn path run synchronously on the caller thread.
+        /// When <c>OPENCV_SENTIS_AVAILABLE</c> and Sentis is selected, inference uses Sentis forward APIs asynchronously on every platform, including Web.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="cancellationToken">Optional token to cancel the operation.</param>
         /// <returns>A task that represents the asynchronous operation. The task result contains a Mat with classification result. The caller is responsible for disposing this Mat.</returns>
-        public virtual async Task<Mat> ClassifyAsync(Mat image, CancellationToken cancellationToken = default)
+        public virtual async Task<Mat> ClassifyTaskAsync(Mat image, CancellationToken cancellationToken = default)
         {
-            await ExecuteAsync(image, cancellationToken);
+            await ExecuteTaskAsync(image, cancellationToken);
             return CopyOutput();
         }
+
+        /// <summary>
+        /// Classify the input image asynchronously.
+        /// </summary>
+        /// <remarks>
+        /// <c>@deprecated</c> Use <see cref="ClassifyTaskAsync(Mat, CancellationToken)"/>. In a future version, this member will return Unity <c>Awaitable</c> instead of <see cref="Task{TResult}"/>.
+        /// See <see cref="ClassifyTaskAsync(Mat, CancellationToken)"/>. Web synchronous fallback applies only to the OpenCV Dnn backend; Sentis remains asynchronous on every platform, including Web.
+        /// </remarks>
+        [Obsolete("Use ClassifyTaskAsync(). ClassifyAsync() will return Awaitable in a future version.")]
+        public virtual Task<Mat> ClassifyAsync(Mat image, CancellationToken cancellationToken = default) =>
+            ClassifyTaskAsync(image, cancellationToken);
 
         /// <summary>
         /// Classify multiple input images.
@@ -246,7 +280,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - useCopyOutput = false (default): Returns a reference to internal buffer (faster but unsafe across executions)
         /// - useCopyOutput = true: Returns a new copy of the result (thread-safe but slightly slower)
         ///
-        /// For better performance in async scenarios, use ClassifyAsync instead.
+        /// For better performance in async scenarios, use ClassifyTaskAsync instead.
         /// </remarks>
         /// <param name="images">Input images in BGR format.</param>
         /// <param name="useCopyOutput">Whether to return a copy of the output (true) or a reference (false).</param>
@@ -272,16 +306,30 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - Use ToStructuredData() or GetBestMatchData() to convert to a more convenient format.
         ///
         /// Only one classification operation can run at a time.
+        ///
+        /// For the OpenCV Dnn module, inference is scheduled on a background thread when thread-pool scheduling is available.
+        /// Web builds cannot use thread pools; only then does the OpenCV Dnn path run synchronously on the caller thread.
+        /// When <c>OPENCV_SENTIS_AVAILABLE</c> and Sentis is selected, inference uses Sentis forward APIs asynchronously on every platform, including Web.
         /// </remarks>
         /// <param name="images">Input images in BGR format.</param>
         /// <param name="cancellationToken">Optional token to cancel the operation.</param>
         /// <returns>A task that represents the asynchronous operation. The task result contains a Mat with classification results for all images. The caller is responsible for disposing this Mat.</returns>
-        public virtual async Task<Mat> ClassifyAsync(IReadOnlyList<Mat> images, CancellationToken cancellationToken = default)
+        public virtual async Task<Mat> ClassifyTaskAsync(IReadOnlyList<Mat> images, CancellationToken cancellationToken = default)
         {
             Mat[] inputArray = images as Mat[] ?? images.ToArray();
-            await ExecuteAsync(inputArray, cancellationToken);
+            await ExecuteTaskAsync(inputArray, cancellationToken);
             return CopyOutput();
         }
+
+        /// <summary>
+        /// Classify multiple input images asynchronously.
+        /// </summary>
+        /// <remarks>
+        /// <c>@deprecated</c> Use <see cref="ClassifyTaskAsync(IReadOnlyList{Mat}, CancellationToken)"/>. In a future version, this member will return Unity <c>Awaitable</c> instead of <see cref="Task{TResult}"/>.
+        /// </remarks>
+        [Obsolete("Use ClassifyTaskAsync(). ClassifyAsync() will return Awaitable in a future version.")]
+        public virtual Task<Mat> ClassifyAsync(IReadOnlyList<Mat> images, CancellationToken cancellationToken = default) =>
+            ClassifyTaskAsync(images, cancellationToken);
 
         /// <summary>
         /// Converts the classification result matrix to an array of ClassificationData structures.
@@ -420,7 +468,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             float maxVal = float.MinValue;
             int maxLoc = 0;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             Span<float> data = result.AsSpan<float>(index);
 
             for (int i = 0; i < data.Length; i++)
@@ -431,25 +478,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     maxLoc = i;
                 }
             }
-#else
-            using (Mat result_row = result.row(index))
-            {
-                int requiredResultRowLen = (int)result_row.total() * result_row.channels();
-                if (_allResultRowBuffer == null || _allResultRowBuffer.Length < requiredResultRowLen)
-                    _allResultRowBuffer = new float[requiredResultRowLen];
-                result_row.get(0, 0, _allResultRowBuffer);
-                float[] data = _allResultRowBuffer;
-
-                for (int i = 0; i < requiredResultRowLen; i++)
-                {
-                    if (data[i] > maxVal)
-                    {
-                        maxVal = data[i];
-                        maxLoc = i;
-                    }
-                }
-            }
-#endif
 
             return new ClassificationData(maxVal, maxLoc);
         }
@@ -565,47 +593,86 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     throw new ArgumentException("The input image must be in BGR format. inputs[" + i + "]");
             }
 
-            // Preprocess
-            Mat inputBlob = PreProcess(inputs);
-
-            // Forward
-            _classificationNet.setInput(inputBlob);
-            List<Mat> outputBlobs = new List<Mat>();
-            _classificationNet.forward(outputBlobs, _cachedUnconnectedOutLayersNames);
-
-            // Postprocess
-            Mat outputBlob = PostProcess(outputBlobs[0]);
-
-            // Any rewriting of buffer data must be done within the lock statement
-            // Do not return the buffer itself because it will be destroyed,
-            // but return a submat of the same size as the result extracted using rowRange
-            Mat submat = null;
-            lock (_lockObject)
+            using (Mat inputBlob = PreProcess(inputs))
             {
-                // Check if _output0Buffer needs to be resized
-                if (_output0Buffer == null || _output0Buffer.rows() < outputBlob.rows() || _output0Buffer.cols() < outputBlob.cols())
+                _forwardOutputList.Clear();
+                _classificationNet.setInput(inputBlob);
+                _classificationNet.forward(_forwardOutputList, _cachedUnconnectedOutLayersNames);
+
+                Mat outputBlob = PostProcess(_forwardOutputList[0]);
+
+                Mat submat = null;
+                lock (_lockObject)
                 {
-                    _output0Buffer.create(outputBlob.rows(), outputBlob.cols(), outputBlob.type());
+                    if (_output0Buffer == null || _output0Buffer.rows() < outputBlob.rows() || _output0Buffer.cols() < outputBlob.cols())
+                    {
+                        _output0Buffer.create(outputBlob.rows(), outputBlob.cols(), outputBlob.type());
+                    }
+
+                    submat = _output0Buffer.rowRange(0, outputBlob.rows());
+                    outputBlob.copyTo(submat);
                 }
 
-                // If buffer is larger, use rowRange to copy only the needed portion
-                submat = _output0Buffer.rowRange(0, outputBlob.rows());
-                outputBlob.copyTo(submat);
+                return new Mat[] { submat }; // [n, num_classes]
             }
-
-            inputBlob.Dispose();
-            for (int i = 0; i < outputBlobs.Count; i++)
-            {
-                outputBlobs[i].Dispose();
-            }
-
-            return new Mat[] { submat }; // [n, num_classes]
         }
 
-        protected override Task<Mat[]> RunCoreProcessingAsync(Mat[] inputs, CancellationToken cancellationToken)
+        protected override async Task<Mat[]> RunCoreProcessingTaskAsync(Mat[] inputs, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(RunCoreProcessing(inputs));
+#if OPENCV_SENTIS_AVAILABLE
+            if (_classificationNet.UsesSentis)
+            {
+                ThrowIfDisposed();
+
+                if (inputs == null)
+                    throw new ArgumentNullException(nameof(inputs), "Inputs cannot be null.");
+
+                for (int i = 0; i < inputs.Length; i++)
+                {
+                    Mat input = inputs[i];
+                    if (input == null)
+                        throw new ArgumentNullException(nameof(inputs), "inputs[" + i + "] cannot be null.");
+
+                    if (input != null) input.ThrowIfDisposed();
+                    if (input.channels() != 3)
+                        throw new ArgumentException("The input image must be in BGR format. inputs[" + i + "]");
+                }
+
+                using (Mat inputBlob = PreProcess(inputs))
+                {
+                    _forwardOutputList.Clear();
+                    _classificationNet.setInput(inputBlob);
+                    await _classificationNet.forwardTaskAsync(_forwardOutputList, _cachedUnconnectedOutLayersNames, cancellationToken);
+
+                    Mat outputBlob = PostProcess(_forwardOutputList[0]);
+
+                    Mat submat = null;
+                    lock (_lockObject)
+                    {
+                        if (_output0Buffer == null || _output0Buffer.rows() < outputBlob.rows() || _output0Buffer.cols() < outputBlob.cols())
+                        {
+                            _output0Buffer.create(outputBlob.rows(), outputBlob.cols(), outputBlob.type());
+                        }
+
+                        submat = _output0Buffer.rowRange(0, outputBlob.rows());
+                        outputBlob.copyTo(submat);
+                    }
+
+                    return new Mat[] { submat };
+                }
+            }
+#endif
+            cancellationToken.ThrowIfCancellationRequested();
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return RunCoreProcessing(inputs);
+#else
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return RunCoreProcessing(inputs);
+            }, cancellationToken);
+#endif
         }
 
         protected virtual Mat PreProcess(IReadOnlyList<Mat> images)
@@ -673,10 +740,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 _inputSizeMatPool?.Dispose(); _inputSizeMatPool = null;
                 _classificationResultBuffer?.Dispose(); _classificationResultBuffer = null;
                 _output0Buffer?.Dispose(); _output0Buffer = null;
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-                _allResultRowBuffer = null;
-#endif
             }
 
             base.Dispose(disposing);
