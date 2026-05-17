@@ -1,4 +1,4 @@
-#if !UNITY_WSA_10_0
+#if !UNITY_WSA_10_0 && NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
 
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,7 @@ using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
 using OpenCVForUnity.UnityIntegration.Worker;
 using OpenCVForUnity.UnityIntegration.Worker.DataStruct;
+using OpenCVForUnity.UnityIntegration.Worker.DnnModule;
 using OpenCVForUnity.UnityIntegration.Worker.Utils;
 
 namespace YOLOv8WithOpenCVForUnity.Worker
@@ -30,7 +31,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
     /// yolov11n.onnx
     /// yolov12n.onnx
     /// </summary>
-    public class YOLOv8ObjectDetector : ProcessingWorkerBase
+    public class YOLOv8ObjectDetector : DnnInferenceWorkerBase
     {
         public enum NMSStrategy
         {
@@ -87,11 +88,12 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         protected float _confThreshold;
         protected float _nmsThreshold;
         protected int _topK;
-        protected int _backend;
-        protected int _target;
         protected int _numClasses = 80;
-        protected Net _objectDetectionNet;
-        protected List<string> _cachedUnconnectedOutLayersNames;
+        protected MultiBackendNet _objectDetectionNet;
+        /// <summary>Output layer names for inference. Cached to avoid calling <c>getUnconnectedOutLayersNames()</c> every frame.</summary>
+        protected readonly List<string> _cachedUnconnectedOutLayersNames;
+        /// <summary>Reusable list for <see cref="MultiBackendNet.forward"/> / <see cref="MultiBackendNet.forwardTaskAsync"/> outputs.</summary>
+        protected readonly List<Mat> _forwardOutputList = new List<Mat>();
         protected List<string> _classNames;
         protected Mat _paddedImg;
         protected Mat _preNMS_Nx6;
@@ -101,13 +103,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         protected MatOfInt _NMS_classIds;
         protected Mat _output0Buffer;
 
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-        protected float[] _allBoxClsconfsBuffer;
-        protected float[] _allPreNMSBuffer;
-        protected int[] _allIndicesBuffer;
-        protected float[] _allResultBuffer;
-#endif
-
         /// <summary>
         /// Gets or sets the NMS strategy to use for object detection.
         /// </summary>
@@ -116,17 +111,31 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// <summary>
         /// Initializes a new instance of the YOLOv8ObjectDetector class.
         /// </summary>
-        /// <param name="modelFilepath">Path to the ONNX model file.</param>
+        /// <param name="modelFilepath">Path to the ONNX model file. For OpenCV, typically an ONNX file; when <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, a serialized path that <c>Unity.InferenceEngine.ModelLoader.Load(string)</c> can load.</param>
         /// <param name="classesFilepath">Path to the text file containing class names.</param>
         /// <param name="inputSize">Input size for the network (default: 640x640).</param>
         /// <param name="confThreshold">Confidence threshold for filtering detections.</param>
         /// <param name="nmsThreshold">Non-maximum suppression threshold.</param>
         /// <param name="topK">Maximum number of output detections.</param>
-        /// <param name="backend">Preferred DNN backend.</param>
-        /// <param name="target">Preferred DNN target device.</param>
+        /// <param name="backend">
+        /// Preferred DNN backend: an OpenCV <see cref="Dnn"/> <c>DNN_BACKEND_*</c> constant, or <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>.
+#if OPENCV_SENTIS_AVAILABLE
+        /// When <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, <paramref name="target"/> is interpreted as an integer <c>Unity.InferenceEngine.BackendType</c> value. Assumes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer.
+#else
+        /// <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/> is only usable when the project includes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer and the OPENCV_SENTIS_AVAILABLE define.
+#endif
+        /// </param>
+        /// <param name="target">
+#if OPENCV_SENTIS_AVAILABLE
+        /// Preferred DNN target (OpenCV <c>DNN_TARGET_*</c>), or if <paramref name="backend"/> is <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, an integer to cast to <c>Unity.InferenceEngine.BackendType</c>.
+#else
+        /// An OpenCV <see cref="Dnn"/> <c>DNN_TARGET_*</c> constant.
+#endif
+        /// </param>
         public YOLOv8ObjectDetector(string modelFilepath, string classesFilepath, Size inputSize,
                                              float confThreshold = 0.25f, float nmsThreshold = 0.45f, int topK = 300,
                                              int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
+            : base(backend, target)
         {
             if (string.IsNullOrEmpty(modelFilepath))
                 throw new ArgumentException("Model filepath cannot be empty.", nameof(modelFilepath));
@@ -137,21 +146,28 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             _confThreshold = Mathf.Clamp01(confThreshold);
             _nmsThreshold = Mathf.Clamp01(nmsThreshold);
             _topK = Math.Max(1, topK);
-            _backend = backend;
-            _target = target;
 
+#if !OPENCV_SENTIS_AVAILABLE
+            if (DnnBackend == MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS)
+            {
+                throw new NotSupportedException(
+                    "DNN_BACKEND_UNITY_SENTIS requires Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer in the project and the OPENCV_SENTIS_AVAILABLE define.");
+            }
+#endif
+            List<string> cachedUnconnectedOutLayersNames;
             try
             {
-                _objectDetectionNet = Dnn.readNetFromONNX(modelFilepath);
+                _objectDetectionNet = MultiBackendDnn.readNet(modelFilepath);
+                _objectDetectionNet.setPreferableBackend(DnnBackend);
+                _objectDetectionNet.setPreferableTarget(DnnTarget);
+                cachedUnconnectedOutLayersNames = _objectDetectionNet.getUnconnectedOutLayersNames();
             }
             catch (Exception e)
             {
                 throw new ArgumentException(
                     "Failed to initialize DNN model. Invalid model file path or corrupted model file.", e);
             }
-            _objectDetectionNet.setPreferableBackend(_backend);
-            _objectDetectionNet.setPreferableTarget(_target);
-            _cachedUnconnectedOutLayersNames = _objectDetectionNet.getUnconnectedOutLayersNames();
+            _cachedUnconnectedOutLayersNames = cachedUnconnectedOutLayersNames;
 
             _output0Buffer = new Mat(_topK, DETECTION_RESULT_COLUMNS, CvType.CV_32FC1);
 
@@ -184,11 +200,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (result.cols() < DETECTION_RESULT_COLUMNS)
                 throw new ArgumentException("Invalid result matrix. It must have at least 6 columns.");
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<ObjectDetectionData> data = ToStructuredDataAsSpan(result);
-#else
-            ObjectDetectionData[] data = ToStructuredData(result);
-#endif
 
             for (int i = 0; i < data.Length; i++)
             {
@@ -254,7 +266,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - useCopyOutput = false (default): Returns a reference to internal buffer (faster but unsafe across executions)
         /// - useCopyOutput = true: Returns a new copy of the result (thread-safe but slightly slower)
         ///
-        /// For better performance in async scenarios, use DetectAsync instead.
+        /// For better performance in async scenarios, use DetectTaskAsync instead.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="useCopyOutput">Whether to return a copy of the output (true) or a reference (false).</param>
@@ -279,15 +291,30 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - Use ToStructuredData() or ToStructuredDataAsSpan() to convert to a more convenient format
         ///
         /// Only one detection operation can run at a time.
+        ///
+        /// For the OpenCV Dnn module, inference is scheduled on a background thread when thread-pool scheduling is available.
+        /// Web builds cannot use thread pools; only then does the OpenCV Dnn path run synchronously on the caller thread.
+        /// When <c>OPENCV_SENTIS_AVAILABLE</c> and Sentis is selected, inference uses Sentis forward APIs asynchronously on every platform, including Web.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="cancellationToken">Optional token to cancel the operation.</param>
         /// <returns>A task that represents the asynchronous operation. The task result contains a Mat with detection result. The caller is responsible for disposing this Mat.</returns>
-        public virtual async Task<Mat> DetectAsync(Mat image, CancellationToken cancellationToken = default)
+        public virtual async Task<Mat> DetectTaskAsync(Mat image, CancellationToken cancellationToken = default)
         {
-            await ExecuteAsync(image, cancellationToken);
+            await ExecuteTaskAsync(image, cancellationToken);
             return CopyOutput();
         }
+
+        /// <summary>
+        /// Detects objects in the input image asynchronously.
+        /// </summary>
+        /// <remarks>
+        /// <c>@deprecated</c> Use <see cref="DetectTaskAsync(Mat, CancellationToken)"/>. In a future version, this member will return Unity <c>Awaitable</c> instead of <see cref="Task{TResult}"/>.
+        /// See <see cref="DetectTaskAsync(Mat, CancellationToken)"/>. Web synchronous fallback applies only to the OpenCV Dnn backend; Sentis remains asynchronous on every platform, including Web.
+        /// </remarks>
+        [Obsolete("Use DetectTaskAsync(). DetectAsync() will return Awaitable in a future version.")]
+        public virtual Task<Mat> DetectAsync(Mat image, CancellationToken cancellationToken = default) =>
+            DetectTaskAsync(image, cancellationToken);
 
         /// <summary>
         /// Converts the detection result matrix to an array of ObjectDetectionData structures.
@@ -310,7 +337,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             return dst;
         }
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
         /// <summary>
         /// Converts the detection result matrix to a span of ObjectDetectionData structures.
         /// </summary>
@@ -330,8 +356,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
             return result.AsSpan<ObjectDetectionData>();
         }
-#endif
-
         /// <summary>
         /// Gets the class label for the given class ID.
         /// </summary>
@@ -371,44 +395,78 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (image.channels() != 3)
                 throw new ArgumentException("The input image must be in BGR format.");
 
-            // Preprocess
-            Mat inputBlob = PreProcess(image);
-
-            // Forward
-            _objectDetectionNet.setInput(inputBlob);
-            List<Mat> outputBlobs = new List<Mat>();
-            try
+            using (Mat inputBlob = PreProcess(image))
             {
-                _objectDetectionNet.forward(outputBlobs, _cachedUnconnectedOutLayersNames);
+                _forwardOutputList.Clear();
+                _objectDetectionNet.setInput(inputBlob);
+                try
+                {
+                    _objectDetectionNet.forward(_forwardOutputList, _cachedUnconnectedOutLayersNames);
+                }
+                catch (Exception e)
+                {
+                    throw new ArgumentException(
+                        "The input size specified in the constructor may not match the model's expected input size. " +
+                        "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
+                }
+
+                Mat submat = PostProcess(_forwardOutputList, image.sizeAsValueTuple());
+
+                return new Mat[] { submat };
             }
-            catch (Exception e)
-            {
-                inputBlob.Dispose();
-                throw new ArgumentException(
-                    "The input size specified in the constructor may not match the model's expected input size. " +
-                    "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
-            }
-
-            // Postprocess
-            Mat submat = PostProcess(outputBlobs, image.sizeAsValueTuple()); // submat of _output0Buffer is returned
-
-            // Any rewriting of buffer data must be done within the lock statement
-            // Do not return the buffer itself because it will be destroyed,
-            // but return a submat of the same size as the result extracted using rowRange
-
-            inputBlob.Dispose();
-            for (int i = 0; i < outputBlobs.Count; i++)
-            {
-                outputBlobs[i].Dispose();
-            }
-
-            return new Mat[] { submat }; // [n, 6] (xyxy, conf, cls)
         }
 
-        protected override Task<Mat[]> RunCoreProcessingAsync(Mat[] inputs, CancellationToken cancellationToken)
+        protected override async Task<Mat[]> RunCoreProcessingTaskAsync(Mat[] inputs, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(RunCoreProcessing(inputs));
+#if OPENCV_SENTIS_AVAILABLE
+            if (_objectDetectionNet.UsesSentis)
+            {
+                ThrowIfDisposed();
+
+                if (inputs == null || inputs.Length < 1)
+                    throw new ArgumentNullException(nameof(inputs), "Inputs cannot be null or have less than 1 elements.");
+
+                if (inputs[0] == null)
+                    throw new ArgumentNullException(nameof(inputs), "inputs[0] cannot be null.");
+
+                Mat image = inputs[0];
+
+                if (image != null) image.ThrowIfDisposed();
+                if (image.channels() != 3)
+                    throw new ArgumentException("The input image must be in BGR format.");
+
+                using (Mat inputBlob = PreProcess(image))
+                {
+                    _forwardOutputList.Clear();
+                    _objectDetectionNet.setInput(inputBlob);
+                    try
+                    {
+                        await _objectDetectionNet.forwardTaskAsync(_forwardOutputList, _cachedUnconnectedOutLayersNames, cancellationToken);
+                    }
+                    catch (Exception e)
+                    {
+                        throw new ArgumentException(
+                            "The input size specified in the constructor may not match the model's expected input size. " +
+                            "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
+                    }
+
+                    Mat submat = PostProcess(_forwardOutputList, image.sizeAsValueTuple());
+
+                    return new Mat[] { submat };
+                }
+            }
+#endif
+            cancellationToken.ThrowIfCancellationRequested();
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return RunCoreProcessing(inputs);
+#else
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return RunCoreProcessing(inputs);
+            }, cancellationToken);
+#endif
         }
 
         protected virtual Mat PreProcess(Mat image)
@@ -511,23 +569,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 preNMS_Nx6_col_4.setTo(SCALAR_0);
             }
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<float> allBoxClsconfs = boxClsconfs.AsSpan<float>();
             Span<float> allPreNMS = preNMS_Nx6.AsSpan<float>();
-#else
-            int requiredBoxClsconfsLen = boxClsconfs_rows * boxClsconfs_cols;
-            int requiredPreNMSLen = num_preNMS * DETECTION_RESULT_COLUMNS;
-
-            if (_allBoxClsconfsBuffer == null || _allBoxClsconfsBuffer.Length < requiredBoxClsconfsLen)
-                _allBoxClsconfsBuffer = new float[requiredBoxClsconfsLen];
-            if (_allPreNMSBuffer == null || _allPreNMSBuffer.Length < requiredPreNMSLen)
-                _allPreNMSBuffer = new float[requiredPreNMSLen];
-
-            boxClsconfs.get(0, 0, _allBoxClsconfsBuffer);
-            preNMS_Nx6.get(0, 0, _allPreNMSBuffer);
-            float[] allBoxClsconfs = _allBoxClsconfsBuffer;
-            float[] allPreNMS = _allPreNMSBuffer;
-#endif
 
             int ind = 0;
             for (int i = 0; i < boxClsconfs_cols; ++i)
@@ -558,15 +601,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                         preNMS_Nx6 = new_preNMS_Nx6;
                         num_preNMS = preNMS_Nx6.rows();
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
                         allPreNMS = preNMS_Nx6.AsSpan<float>();
-#else
-                        requiredPreNMSLen = num_preNMS * DETECTION_RESULT_COLUMNS;
-                        float[] newBuffer = new float[requiredPreNMSLen];
-                        Array.Copy(_allPreNMSBuffer, newBuffer, _allPreNMSBuffer.Length);
-                        _allPreNMSBuffer = newBuffer;
-                        allPreNMS = _allPreNMSBuffer;
-#endif
                     }
 
                     int preNMSIdx = ind * DETECTION_RESULT_COLUMNS;
@@ -592,10 +627,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     ind++;
                 }
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            preNMS_Nx6.put(0, 0, _allPreNMSBuffer);
-#endif
         }
 
         protected virtual void NMS(Mat preNMS_Nx6, float score_threshold, float nms_threshold, MatOfInt indices,
@@ -691,27 +722,9 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (num == 0)
                 return result;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<float> allPreNMS = preNMS_Nx6.AsSpan<float>();
             ReadOnlySpan<int> allIndices = indices.AsSpan<int>();
             Span<float> allResult = result.AsSpan<float>();
-#else
-            int requiredPreNMSLen = preNMS_Nx6.rows() * DETECTION_RESULT_COLUMNS;
-            int requiredIndicesLen = buffer.rows();
-            int requiredResultLen = buffer.rows() * DETECTION_RESULT_COLUMNS;
-            if (_allPreNMSBuffer == null || _allPreNMSBuffer.Length < requiredPreNMSLen)
-                _allPreNMSBuffer = new float[requiredPreNMSLen];
-            if (_allIndicesBuffer == null || _allIndicesBuffer.Length < requiredIndicesLen)
-                _allIndicesBuffer = new int[requiredIndicesLen];
-            if (_allResultBuffer == null || _allResultBuffer.Length < requiredResultLen)
-                _allResultBuffer = new float[requiredResultLen];
-
-            preNMS_Nx6.get(0, 0, _allPreNMSBuffer);
-            indices.get(0, 0, _allIndicesBuffer);
-            float[] allPreNMS = _allPreNMSBuffer;
-            int[] allIndices = _allIndicesBuffer;
-            float[] allResult = _allResultBuffer;
-#endif
 
             for (int i = 0; i < num; ++i)
             {
@@ -719,16 +732,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 int resultOffset = i * DETECTION_RESULT_COLUMNS;
                 int preNMSOffset = idx * DETECTION_RESULT_COLUMNS;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
                 allPreNMS.Slice(preNMSOffset, DETECTION_RESULT_COLUMNS).CopyTo(allResult.Slice(resultOffset, DETECTION_RESULT_COLUMNS));
-#else
-                Buffer.BlockCopy(allPreNMS, preNMSOffset * 4, allResult, resultOffset * 4, DETECTION_RESULT_COLUMNS * 4);
-#endif
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            result.put(0, 0, _allResultBuffer);
-#endif
 
             return result;
         }
@@ -751,16 +756,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             float pad_w = (input_w - original_w * gain) / 2;
             float pad_h = (input_h - original_h * gain) / 2;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             Span<float> allResult = result.AsSpan<float>();
-#else
-            int requiredResultLen = num * DETECTION_RESULT_COLUMNS;
-            if (_allResultBuffer == null || _allResultBuffer.Length < requiredResultLen)
-                _allResultBuffer = new float[requiredResultLen];
-
-            result.get(0, 0, _allResultBuffer);
-            float[] allResult = _allResultBuffer;
-#endif
 
             for (int i = 0; i < num; ++i)
             {
@@ -780,10 +776,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 allResult[resultOffset + 2] = x2;
                 allResult[resultOffset + 3] = y2;
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            result.put(0, 0, _allResultBuffer);
-#endif
         }
 
         protected virtual List<string> ReadClassNames(string filename)
@@ -805,13 +797,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 _NMS_confidences?.Dispose(); _NMS_confidences = null;
                 _NMS_classIds?.Dispose(); _NMS_classIds = null;
                 _output0Buffer?.Dispose(); _output0Buffer = null;
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-                _allBoxClsconfsBuffer = null;
-                _allPreNMSBuffer = null;
-                _allIndicesBuffer = null;
-                _allResultBuffer = null;
-#endif
             }
 
             base.Dispose(disposing);

@@ -2,7 +2,8 @@
     "name": "EnoxSoftware.YOLOv8WithOpenCVForUnity",
     "rootNamespace": "",
     "references": [
-        "GUID:cef0e9dabbfe59a4790acbf31c21f33e"
+        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
+        "Unity.InferenceEngine"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -11,6 +12,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.ai.inference",
+            "expression": "2.6.1",
+            "define": "OPENCV_SENTIS_AVAILABLE"
+        }
+    ],
     "noEngineReferences": false
 }

@@ -1,4 +1,4 @@
-#if !UNITY_WSA_10_0
+#if !UNITY_WSA_10_0 && NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
 
 using System;
 using System.Collections.Generic;
@@ -13,6 +13,7 @@ using OpenCVForUnity.UnityIntegration;
 using UnityEngine;
 using OpenCVForUnity.UnityIntegration.Worker;
 using OpenCVForUnity.UnityIntegration.Worker.DataStruct;
+using OpenCVForUnity.UnityIntegration.Worker.DnnModule;
 using OpenCVForUnity.UnityIntegration.Worker.Utils;
 
 namespace YOLOv8WithOpenCVForUnity.Worker
@@ -27,7 +28,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
     /// yolov8n-pose.onnx
     /// yolov11n-pose.onnx
     /// </summary>
-    public class YOLOv8PoseEstimater : ProcessingWorkerBase
+    public class YOLOv8PoseEstimater : DnnInferenceWorkerBase
     {
         public enum NMSStrategy
         {
@@ -114,11 +115,12 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         protected float _confThreshold;
         protected float _nmsThreshold;
         protected int _topK;
-        protected int _backend;
-        protected int _target;
         protected int _numClasses = 1;
-        protected Net _poseEstimationNet;
-        protected List<string> _cachedUnconnectedOutLayersNames;
+        protected MultiBackendNet _poseEstimationNet;
+        /// <summary>Output layer names for inference. Cached to avoid calling <c>getUnconnectedOutLayersNames()</c> every frame.</summary>
+        protected readonly List<string> _cachedUnconnectedOutLayersNames;
+        /// <summary>Reusable list for <see cref="MultiBackendNet.forward"/> / <see cref="MultiBackendNet.forwardTaskAsync"/> outputs.</summary>
+        protected readonly List<Mat> _forwardOutputList = new List<Mat>();
         protected List<string> _classNames;
         protected Mat _paddedImg;
         protected Mat _preNMS_Nx56;
@@ -128,13 +130,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         protected MatOfInt _NMS_classIds;
         protected Mat _output0Buffer;
 
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-        protected float[] _allBoxClsconfsKptsBuffer;
-        protected float[] _allPreNMSBuffer;
-        protected int[] _allIndicesBuffer;
-        protected float[] _allResultBuffer;
-#endif
-
         /// <summary>
         /// Gets or sets the NMS strategy to use for pose estimation.
         /// </summary>
@@ -143,17 +138,31 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// <summary>
         /// Initializes a new instance of the YOLOv8PoseEstimater class.
         /// </summary>
-        /// <param name="modelFilepath">Path to the ONNX model file.</param>
+        /// <param name="modelFilepath">Path to the ONNX model file. For OpenCV, typically an ONNX file; when <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, a serialized path that <c>Unity.InferenceEngine.ModelLoader.Load(string)</c> can load.</param>
         /// <param name="classesFilepath">Path to the text file containing class names.</param>
         /// <param name="inputSize">Input size for the network (default: 640x640).</param>
         /// <param name="confThreshold">Confidence threshold for filtering detections.</param>
         /// <param name="nmsThreshold">Non-maximum suppression threshold.</param>
         /// <param name="topK">Maximum number of output detections.</param>
-        /// <param name="backend">Preferred DNN backend.</param>
-        /// <param name="target">Preferred DNN target device.</param>
+        /// <param name="backend">
+        /// Preferred DNN backend: an OpenCV <see cref="Dnn"/> <c>DNN_BACKEND_*</c> constant, or <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>.
+#if OPENCV_SENTIS_AVAILABLE
+        /// When <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, <paramref name="target"/> is interpreted as an integer <c>Unity.InferenceEngine.BackendType</c> value. Assumes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer.
+#else
+        /// <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/> is only usable when the project includes Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer and the OPENCV_SENTIS_AVAILABLE define.
+#endif
+        /// </param>
+        /// <param name="target">
+#if OPENCV_SENTIS_AVAILABLE
+        /// Preferred DNN target (OpenCV <c>DNN_TARGET_*</c>), or if <paramref name="backend"/> is <see cref="MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS"/>, an integer to cast to <c>Unity.InferenceEngine.BackendType</c>.
+#else
+        /// An OpenCV <see cref="Dnn"/> <c>DNN_TARGET_*</c> constant.
+#endif
+        /// </param>
         public YOLOv8PoseEstimater(string modelFilepath, string classesFilepath, Size inputSize,
                                              float confThreshold = 0.25f, float nmsThreshold = 0.45f, int topK = 300,
                                              int backend = Dnn.DNN_BACKEND_OPENCV, int target = Dnn.DNN_TARGET_CPU)
+            : base(backend, target)
         {
             if (string.IsNullOrEmpty(modelFilepath))
                 throw new ArgumentException("Model filepath cannot be empty.", nameof(modelFilepath));
@@ -164,21 +173,28 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             _confThreshold = Mathf.Clamp01(confThreshold);
             _nmsThreshold = Mathf.Clamp01(nmsThreshold);
             _topK = Math.Max(1, topK);
-            _backend = backend;
-            _target = target;
 
+#if !OPENCV_SENTIS_AVAILABLE
+            if (DnnBackend == MultiBackendDnn.DNN_BACKEND_UNITY_SENTIS)
+            {
+                throw new NotSupportedException(
+                    "DNN_BACKEND_UNITY_SENTIS requires Unity Inference Engine (com.unity.ai.inference) 2.6.1 or newer in the project and the OPENCV_SENTIS_AVAILABLE define.");
+            }
+#endif
+            List<string> cachedUnconnectedOutLayersNames;
             try
             {
-                _poseEstimationNet = Dnn.readNetFromONNX(modelFilepath);
+                _poseEstimationNet = MultiBackendDnn.readNet(modelFilepath);
+                _poseEstimationNet.setPreferableBackend(DnnBackend);
+                _poseEstimationNet.setPreferableTarget(DnnTarget);
+                cachedUnconnectedOutLayersNames = _poseEstimationNet.getUnconnectedOutLayersNames();
             }
             catch (Exception e)
             {
                 throw new ArgumentException(
                     "Failed to initialize DNN model. Invalid model file path or corrupted model file.", e);
             }
-            _poseEstimationNet.setPreferableBackend(_backend);
-            _poseEstimationNet.setPreferableTarget(_target);
-            _cachedUnconnectedOutLayersNames = _poseEstimationNet.getUnconnectedOutLayersNames();
+            _cachedUnconnectedOutLayersNames = cachedUnconnectedOutLayersNames;
 
             _output0Buffer = new Mat(_topK, DETECTION_RESULT_COLUMNS + KPTS_COLUMNS, CvType.CV_32FC1);
 
@@ -211,11 +227,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (result.cols() < DETECTION_RESULT_COLUMNS + KPTS_COLUMNS)
                 throw new ArgumentException("Invalid result matrix. It must have at least 56 columns.");
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<PoseEstimationCOCO17DataUnsafe> data = ToStructuredDataAsSpanUnsafe(result);
-#else
-            PoseEstimationCOCO17Data[] data = ToStructuredData(result);
-#endif
 
             for (int i = 0; i < data.Length; i++)
             {
@@ -244,11 +256,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
                 // draw points
                 int radius = 5;
-#if NET_STANDARD_2_1
                 ReadOnlySpan<Vec3f> landmarks = d.GetLandmarks();
-#else
-                Vec3f[] landmarks = d.GetLandmarksArray();
-#endif
                 for (int j = 0; j < landmarks.Length; j++)
                 {
                     var point_c = POSE_PALETTE[KPT_COLOR_INDEX[j]].ToValueTuple();
@@ -311,11 +319,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     sb.AppendLine();
                     sb.AppendFormat("Box: ({0:F3}, {1:F3}, {2:F3}, {3:F3})", d.X1, d.Y1, d.X2, d.Y2);
                     sb.AppendLine();
-#if NET_STANDARD_2_1
                     ReadOnlySpan<Vec3f> landmarks = d.GetLandmarks();
-#else
-                    Vec3f[] landmarks = d.GetLandmarksArray();
-#endif
                     sb.Append("Landmarks: ");
                     sb.Append("{");
                     for (int j = 0; j < landmarks.Length; j++)
@@ -350,7 +354,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - useCopyOutput = false (default): Returns a reference to internal buffer (faster but unsafe across executions)
         /// - useCopyOutput = true: Returns a new copy of the result (thread-safe but slightly slower)
         ///
-        /// For better performance in async scenarios, use EstimateAsync instead.
+        /// For better performance in async scenarios, use EstimateTaskAsync instead.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="useCopyOutput">Whether to return a copy of the output (true) or a reference (false).</param>
@@ -375,15 +379,30 @@ namespace YOLOv8WithOpenCVForUnity.Worker
         /// - Use ToStructuredDataUnsafe() or ToStructuredDataAsSpanUnsafe() to convert to a more convenient format
         ///
         /// Only one pose estimation operation can run at a time.
+        ///
+        /// For the OpenCV Dnn module, inference is scheduled on a background thread when thread-pool scheduling is available.
+        /// Web builds cannot use thread pools; only then does the OpenCV Dnn path run synchronously on the caller thread.
+        /// When <c>OPENCV_SENTIS_AVAILABLE</c> and Sentis is selected, inference uses Sentis forward APIs asynchronously on every platform, including Web.
         /// </remarks>
         /// <param name="image">Input image in BGR format.</param>
         /// <param name="cancellationToken">Optional token to cancel the operation.</param>
         /// <returns>A task that represents the asynchronous operation. The task result contains a Mat containing pose estimation result. The caller is responsible for disposing this Mat.</returns>
-        public virtual async Task<Mat> EstimateAsync(Mat image, CancellationToken cancellationToken = default)
+        public virtual async Task<Mat> EstimateTaskAsync(Mat image, CancellationToken cancellationToken = default)
         {
-            await ExecuteAsync(image, cancellationToken);
+            await ExecuteTaskAsync(image, cancellationToken);
             return CopyOutput(0);
         }
+
+        /// <summary>
+        /// Estimates poses in the input image asynchronously.
+        /// </summary>
+        /// <remarks>
+        /// <c>@deprecated</c> Use <see cref="EstimateTaskAsync(Mat, CancellationToken)"/>. In a future version, this member will return Unity <c>Awaitable</c> instead of <see cref="Task{TResult}"/>.
+        /// See <see cref="EstimateTaskAsync(Mat, CancellationToken)"/>. Web synchronous fallback applies only to the OpenCV Dnn backend; Sentis remains asynchronous on every platform, including Web.
+        /// </remarks>
+        [Obsolete("Use EstimateTaskAsync(). EstimateAsync() will return Awaitable in a future version.")]
+        public virtual Task<Mat> EstimateAsync(Mat image, CancellationToken cancellationToken = default) =>
+            EstimateTaskAsync(image, cancellationToken);
 
         /// <summary>
         /// Converts the pose estimation result matrix to an array of PoseEstimationCOCO17Data structures.
@@ -412,7 +431,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             return dst;
         }
 
-#if !OPENCV_DONT_USE_UNSAFE_CODE
         /// <summary>
         /// Converts the pose estimation result matrix to an array of PoseEstimationCOCO17DataUnsafe structures.
         /// </summary>
@@ -433,9 +451,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
             return dst;
         }
-#endif
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
         /// <summary>
         /// Converts the pose estimation result matrix to a span of PoseEstimationCOCO17DataUnsafe structures.
         /// </summary>
@@ -455,7 +471,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
 
             return result.AsSpan<PoseEstimationCOCO17DataUnsafe>();
         }
-#endif
 
         /// <summary>
         /// Gets the class label for the given class ID.
@@ -496,44 +511,78 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (image.channels() != 3)
                 throw new ArgumentException("The input image must be in BGR format.");
 
-            // Preprocess
-            Mat inputBlob = PreProcess(image);
-
-            // Forward
-            _poseEstimationNet.setInput(inputBlob);
-            List<Mat> outputBlobs = new List<Mat>();
-            try
+            using (Mat inputBlob = PreProcess(image))
             {
-                _poseEstimationNet.forward(outputBlobs, _cachedUnconnectedOutLayersNames);
+                _forwardOutputList.Clear();
+                _poseEstimationNet.setInput(inputBlob);
+                try
+                {
+                    _poseEstimationNet.forward(_forwardOutputList, _cachedUnconnectedOutLayersNames);
+                }
+                catch (Exception e)
+                {
+                    throw new ArgumentException(
+                        "The input size specified in the constructor may not match the model's expected input size. " +
+                        "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
+                }
+
+                Mat submat = PostProcess(_forwardOutputList, image.sizeAsValueTuple());
+
+                return new Mat[] { submat };
             }
-            catch (Exception e)
-            {
-                inputBlob.Dispose();
-                throw new ArgumentException(
-                    "The input size specified in the constructor may not match the model's expected input size. " +
-                    "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
-            }
-
-            // Postprocess
-            Mat submat = PostProcess(outputBlobs, image.sizeAsValueTuple()); // submat of _output0Buffer is returned
-
-            // Any rewriting of buffer data must be done within the lock statement
-            // Do not return the buffer itself because it will be destroyed,
-            // but return a submat of the same size as the result extracted using rowRange
-
-            inputBlob.Dispose();
-            for (int i = 0; i < outputBlobs.Count; i++)
-            {
-                outputBlobs[i].Dispose();
-            }
-
-            return new Mat[] { submat }; // [n, 6 + 51] (xyxy, conf, cls, kpts)
         }
 
-        protected override Task<Mat[]> RunCoreProcessingAsync(Mat[] inputs, CancellationToken cancellationToken)
+        protected override async Task<Mat[]> RunCoreProcessingTaskAsync(Mat[] inputs, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(RunCoreProcessing(inputs));
+#if OPENCV_SENTIS_AVAILABLE
+            if (_poseEstimationNet.UsesSentis)
+            {
+                ThrowIfDisposed();
+
+                if (inputs == null || inputs.Length < 1)
+                    throw new ArgumentNullException(nameof(inputs), "Inputs cannot be null or have less than 1 elements.");
+
+                if (inputs[0] == null)
+                    throw new ArgumentNullException(nameof(inputs), "inputs[0] cannot be null.");
+
+                Mat image = inputs[0];
+
+                if (image != null) image.ThrowIfDisposed();
+                if (image.channels() != 3)
+                    throw new ArgumentException("The input image must be in BGR format.");
+
+                using (Mat inputBlob = PreProcess(image))
+                {
+                    _forwardOutputList.Clear();
+                    _poseEstimationNet.setInput(inputBlob);
+                    try
+                    {
+                        await _poseEstimationNet.forwardTaskAsync(_forwardOutputList, _cachedUnconnectedOutLayersNames, cancellationToken);
+                    }
+                    catch (Exception e)
+                    {
+                        throw new ArgumentException(
+                            "The input size specified in the constructor may not match the model's expected input size. " +
+                            "Please verify the correct input size for your model and update the constructor parameters accordingly.", e);
+                    }
+
+                    Mat submat = PostProcess(_forwardOutputList, image.sizeAsValueTuple());
+
+                    return new Mat[] { submat };
+                }
+            }
+#endif
+            cancellationToken.ThrowIfCancellationRequested();
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return RunCoreProcessing(inputs);
+#else
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return RunCoreProcessing(inputs);
+            }, cancellationToken);
+#endif
         }
 
         protected virtual Mat PreProcess(Mat image)
@@ -636,23 +685,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 preNMS_Nx56_col_4.setTo(SCALAR_0);
             }
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<float> allBoxClsconfsKpts = boxClsconfsKpts.AsSpan<float>();
             Span<float> allPreNMS = preNMS_Nx56.AsSpan<float>();
-#else
-            int requiredBoxClsconfsKptsLen = boxClsconfsKpts_rows * boxClsconfsKpts_cols;
-            int requiredPreNMSLen = num_preNMS * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-
-            if (_allBoxClsconfsKptsBuffer == null || _allBoxClsconfsKptsBuffer.Length < requiredBoxClsconfsKptsLen)
-                _allBoxClsconfsKptsBuffer = new float[requiredBoxClsconfsKptsLen];
-            if (_allPreNMSBuffer == null || _allPreNMSBuffer.Length < requiredPreNMSLen)
-                _allPreNMSBuffer = new float[requiredPreNMSLen];
-
-            boxClsconfsKpts.get(0, 0, _allBoxClsconfsKptsBuffer);
-            preNMS_Nx56.get(0, 0, _allPreNMSBuffer);
-            float[] allBoxClsconfsKpts = _allBoxClsconfsKptsBuffer;
-            float[] allPreNMS = _allPreNMSBuffer;
-#endif
 
             int ind = 0;
             for (int i = 0; i < boxClsconfsKpts_cols; ++i)
@@ -683,15 +717,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                         preNMS_Nx56 = new_preNMS_Nx56;
                         num_preNMS = preNMS_Nx56.rows();
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
                         allPreNMS = preNMS_Nx56.AsSpan<float>();
-#else
-                        requiredPreNMSLen = num_preNMS * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-                        float[] newBuffer = new float[requiredPreNMSLen];
-                        Array.Copy(_allPreNMSBuffer, newBuffer, _allPreNMSBuffer.Length);
-                        _allPreNMSBuffer = newBuffer;
-                        allPreNMS = _allPreNMSBuffer;
-#endif
                     }
 
                     int preNMSIdx = ind * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
@@ -724,10 +750,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     ind++;
                 }
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            preNMS_Nx56.put(0, 0, _allPreNMSBuffer);
-#endif
         }
 
         protected virtual void NMS(Mat preNMS_Nx6, float score_threshold, float nms_threshold, MatOfInt indices,
@@ -823,27 +845,9 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             if (num == 0)
                 return result;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             ReadOnlySpan<float> allPreNMS = preNMS_Nx56.AsSpan<float>();
             ReadOnlySpan<int> allIndices = indices.AsSpan<int>();
             Span<float> allResult = result.AsSpan<float>();
-#else
-            int requiredPreNMSLen = preNMS_Nx56.rows() * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-            int requiredIndicesLen = output0Buffer.rows();
-            int requiredResultLen = output0Buffer.rows() * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-            if (_allPreNMSBuffer == null || _allPreNMSBuffer.Length < requiredPreNMSLen)
-                _allPreNMSBuffer = new float[requiredPreNMSLen];
-            if (_allIndicesBuffer == null || _allIndicesBuffer.Length < requiredIndicesLen)
-                _allIndicesBuffer = new int[requiredIndicesLen];
-            if (_allResultBuffer == null || _allResultBuffer.Length < requiredResultLen)
-                _allResultBuffer = new float[requiredResultLen];
-
-            preNMS_Nx56.get(0, 0, _allPreNMSBuffer);
-            indices.get(0, 0, _allIndicesBuffer);
-            float[] allPreNMS = _allPreNMSBuffer;
-            int[] allIndices = _allIndicesBuffer;
-            float[] allResult = _allResultBuffer;
-#endif
 
             for (int i = 0; i < num; ++i)
             {
@@ -852,16 +856,8 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 int preNMSOffset = idx * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
 
                 // Copy detection and kpts data
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
                 allPreNMS.Slice(preNMSOffset, DETECTION_RESULT_COLUMNS + KPTS_COLUMNS).CopyTo(allResult.Slice(resultOffset, DETECTION_RESULT_COLUMNS + KPTS_COLUMNS));
-#else
-                Buffer.BlockCopy(allPreNMS, preNMSOffset * 4, allResult, resultOffset * 4, (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS) * 4);
-#endif
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            result.put(0, 0, _allResultBuffer);
-#endif
 
             return result;
         }
@@ -884,16 +880,7 @@ namespace YOLOv8WithOpenCVForUnity.Worker
             float pad_w = (input_w - original_w * gain) / 2;
             float pad_h = (input_h - original_h * gain) / 2;
 
-#if NET_STANDARD_2_1 && !OPENCV_DONT_USE_UNSAFE_CODE
             Span<float> allResult = result.AsSpan<float>();
-#else
-            int requiredResultLen = num * (DETECTION_RESULT_COLUMNS + KPTS_COLUMNS);
-            if (_allResultBuffer == null || _allResultBuffer.Length < requiredResultLen)
-                _allResultBuffer = new float[requiredResultLen];
-
-            result.get(0, 0, _allResultBuffer);
-            float[] allResult = _allResultBuffer;
-#endif
 
             for (int i = 0; i < num; ++i)
             {
@@ -920,10 +907,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                     allResult[kptOffset + j + 1] = (allResult[kptOffset + j + 1] - pad_h) / gain;
                 }
             }
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-            result.put(0, 0, _allResultBuffer);
-#endif
         }
 
         protected virtual List<string> ReadClassNames(string filename)
@@ -945,13 +928,6 @@ namespace YOLOv8WithOpenCVForUnity.Worker
                 _NMS_confidences?.Dispose(); _NMS_confidences = null;
                 _NMS_classIds?.Dispose(); _NMS_classIds = null;
                 _output0Buffer?.Dispose(); _output0Buffer = null;
-
-#if !NET_STANDARD_2_1 || OPENCV_DONT_USE_UNSAFE_CODE
-                _allBoxClsconfsKptsBuffer = null;
-                _allPreNMSBuffer = null;
-                _allIndicesBuffer = null;
-                _allResultBuffer = null;
-#endif
             }
 
             base.Dispose(disposing);
